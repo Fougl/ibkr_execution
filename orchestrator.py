@@ -6,6 +6,8 @@ import time
 import logging
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
+import boto3
+from botocore.exceptions import ClientError
 
 # =========================
 # PATHS (LOCKED)
@@ -50,19 +52,40 @@ logger.addHandler(handler)
 # =========================
 
 def load_account_secrets():
-    logger.info("Loading account secrets")
+    logger.info("Loading account secrets from AWS Secrets Manager")
+
+    secret_name = "ibkr-accounts"
+    region_name = "us-east-1"  # change if needed
+
+    client = boto3.client(
+        service_name="secretsmanager",
+        region_name=region_name
+    )
+
+    try:
+        response = client.get_secret_value(
+            SecretId=secret_name
+        )
+    except ClientError as e:
+        logger.error(f"Failed to load secret {secret_name}: {e}")
+        raise
+
+    secret_string = response.get("SecretString")
+    if not secret_string:
+        raise RuntimeError("SecretString is empty")
+
+    raw_accounts = json.loads(secret_string)
+
     accounts = []
+    for account_id, data in raw_accounts.items():
+        logger.info(f"Loaded secret for account {account_id}")
 
-    for f in sorted(SECRETS_DIR.glob("*.json")):
-        logger.info(f"Reading secret file {f}")
-        with open(f, "r") as fh:
-            data = json.load(fh)
-
-        data["account_id"] = f.stem
+        data["account_id"] = account_id
         accounts.append(data)
 
-    logger.info(f"Loaded {len(accounts)} account(s)")
+    logger.info(f"Loaded {len(accounts)} account(s) from Secrets Manager")
     return accounts
+
 
 
 def write_config_ini(account, account_dir, api_port):
