@@ -124,19 +124,15 @@ LogLevel=INFO
 
 def start_ibc(account_id, account_dir, config_path):
     log_dir = account_dir / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(exist_ok=True)
 
     log_file = open(log_dir / "ibc.log", "a")
 
-    env = os.environ.copy()
-    env["DISPLAY"] = ":0"
-
-    # IMPORTANT: separate TWS settings per account (IBC requirement)
-    env["TWS_SETTINGS_PATH"] = str(account_dir / "tws_settings")
-
     cmd = [
-        str(IBC_GATEWAY_SCRIPT),
-        str(config_path)
+        "xvfb-run",
+        "-a",
+        "/opt/ib/gatewaystart.sh",
+        str(config_path),
     ]
 
     logger.info(f"Starting IBC (Gateway) for {account_id}")
@@ -146,15 +142,10 @@ def start_ibc(account_id, account_dir, config_path):
         cmd,
         stdout=log_file,
         stderr=log_file,
-        env=env,
-        cwd=str(IBC_DIR)
+        cwd=str(account_dir)
     )
 
-    logger.info(
-        f"IBC launcher started for {account_id} "
-        f"(pid={proc.pid})"
-    )
-
+    logger.info(f"IBC launcher started for {account_id} (pid={proc.pid})")
     return proc
 
 
