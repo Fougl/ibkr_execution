@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 BASE_DIR = Path("/opt/ib")
 
 # IBC install (from your setup.yaml)
-IBC_DIR = Path("/home/ubuntu/IBC")
+IBC_DIR = Path("/opt/ib")
 IBC_GATEWAY_SCRIPT = IBC_DIR / "gatewaystart.sh"
 
 ACCOUNTS_DIR = BASE_DIR / "accounts"
