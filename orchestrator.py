@@ -16,7 +16,7 @@ from botocore.exceptions import ClientError
 BASE_DIR = Path("/opt/ib")
 
 IBC_JAR = BASE_DIR / "IBC.jar"
-IB_GATEWAY_DIR = BASE_DIR 
+IB_GATEWAY_DIR = BASE_DIR
 
 ACCOUNTS_DIR = BASE_DIR / "accounts"
 SECRETS_DIR = BASE_DIR / "secrets"
@@ -29,7 +29,7 @@ JAVA_BIN = "java"
 # LOGGING
 # =========================
 
-LOGS_DIR.mkdir(exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("orchestrator")
 logger.setLevel(logging.INFO)
@@ -95,8 +95,6 @@ def load_account_secrets():
     return accounts
 
 
-
-
 def write_config_ini(account, account_dir, api_port):
     config_path = account_dir / "config.ini"
 
@@ -130,7 +128,7 @@ LogLevel=INFO
 
 def start_ibc(account_id, account_dir, config_path):
     log_dir = account_dir / "logs"
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     log_file = open(log_dir / "ibc.log", "a")
 
@@ -166,7 +164,7 @@ def start_ibc(account_id, account_dir, config_path):
 def main():
     logger.info("========== ORCHESTRATOR START ==========")
 
-    ACCOUNTS_DIR.mkdir(exist_ok=True)
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
 
     accounts = load_account_secrets()
     if not accounts:
@@ -181,7 +179,7 @@ def main():
         logger.info(f"--- Account {account_id} ---")
 
         account_dir = ACCOUNTS_DIR / account_id
-        account_dir.mkdir(exist_ok=True)
+        account_dir.mkdir(parents=True, exist_ok=True)
 
         config_path = write_config_ini(account, account_dir, api_port)
         proc = start_ibc(account_id, account_dir, config_path)
