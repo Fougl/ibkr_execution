@@ -52,39 +52,48 @@ logger.addHandler(handler)
 # =========================
 
 def load_account_secrets():
-    logger.info("Loading account secrets from AWS Secrets Manager")
+    logger.info("Discovering IBKR secrets from AWS Secrets Manager")
 
-    secret_name = "ibkr-accounts"
     region_name = "us-east-1"  # change if needed
-
-    client = boto3.client(
-        service_name="secretsmanager",
-        region_name=region_name
-    )
-
-    try:
-        response = client.get_secret_value(
-            SecretId=secret_name
-        )
-    except ClientError as e:
-        logger.error(f"Failed to load secret {secret_name}: {e}")
-        raise
-
-    secret_string = response.get("SecretString")
-    if not secret_string:
-        raise RuntimeError("SecretString is empty")
-
-    raw_accounts = json.loads(secret_string)
+    client = boto3.client("secretsmanager", region_name=region_name)
 
     accounts = []
-    for account_id, data in raw_accounts.items():
-        logger.info(f"Loaded secret for account {account_id}")
 
-        data["account_id"] = account_id
-        accounts.append(data)
+    paginator = client.get_paginator("list_secrets")
 
-    logger.info(f"Loaded {len(accounts)} account(s) from Secrets Manager")
+    for page in paginator.paginate():
+        for secret in page.get("SecretList", []):
+            name = secret["Name"]
+
+            if "ibkr" not in name.lower():
+                continue
+
+            logger.info(f"Found IBKR secret: {name}")
+
+            try:
+                response = client.get_secret_value(SecretId=name)
+            except ClientError as e:
+                logger.error(f"Failed to read secret {name}: {e}")
+                continue
+
+            secret_string = response.get("SecretString")
+            if not secret_string:
+                logger.error(f"Secret {name} has no SecretString")
+                continue
+
+            data = json.loads(secret_string)
+
+            # REQUIRED keys validation
+            for k in ("username", "password", "mode"):
+                if k not in data:
+                    raise RuntimeError(f"Secret {name} missing key: {k}")
+
+            data["account_id"] = name
+            accounts.append(data)
+
+    logger.info(f"Loaded {len(accounts)} IBKR account(s)")
     return accounts
+
 
 
 
