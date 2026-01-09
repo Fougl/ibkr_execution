@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 import logging
+import os
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 import boto3
@@ -15,15 +16,14 @@ from botocore.exceptions import ClientError
 
 BASE_DIR = Path("/opt/ib")
 
-IBC_JAR = BASE_DIR / "IBC.jar"
-IB_GATEWAY_DIR = BASE_DIR
+# IBC install (from your setup.yaml)
+IBC_DIR = Path("/home/ubuntu/IBC")
+IBC_GATEWAY_SCRIPT = IBC_DIR / "gatewaystart.sh"
 
 ACCOUNTS_DIR = BASE_DIR / "accounts"
-SECRETS_DIR = BASE_DIR / "secrets"
 LOGS_DIR = BASE_DIR / "logs"
 
 BASE_API_PORT = 4001
-JAVA_BIN = "java"
 
 # =========================
 # LOGGING
@@ -54,9 +54,7 @@ logger.addHandler(handler)
 def load_account_secrets():
     logger.info("Discovering IBKR secrets from AWS Secrets Manager")
 
-    region_name = "us-east-1"  # change if needed
-    client = boto3.client("secretsmanager", region_name=region_name)
-
+    client = boto3.client("secretsmanager", region_name="us-east-1")
     accounts = []
 
     paginator = client.get_paginator("list_secrets")
@@ -83,7 +81,6 @@ def load_account_secrets():
 
             data = json.loads(secret_string)
 
-            # REQUIRED keys validation
             for k in ("username", "password", "mode"):
                 if k not in data:
                     raise RuntimeError(f"Secret {name} missing key: {k}")
@@ -105,7 +102,6 @@ def write_config_ini(account, account_dir, api_port):
 
     content = f"""
 [ibc]
-IbDir={IB_GATEWAY_DIR}
 GatewayOrTws=gateway
 TradingMode={account['mode']}
 IbLoginId={account['username']}
@@ -132,25 +128,30 @@ def start_ibc(account_id, account_dir, config_path):
 
     log_file = open(log_dir / "ibc.log", "a")
 
+    env = os.environ.copy()
+    env["DISPLAY"] = ":0"
+
+    # IMPORTANT: separate TWS settings per account (IBC requirement)
+    env["TWS_SETTINGS_PATH"] = str(account_dir / "tws_settings")
+
     cmd = [
-        JAVA_BIN,
-        "-jar",
-        str(IBC_JAR),
+        str(IBC_GATEWAY_SCRIPT),
         str(config_path)
     ]
 
-    logger.info(f"Starting IBC for {account_id}")
+    logger.info(f"Starting IBC (Gateway) for {account_id}")
     logger.info(f"Command: {' '.join(cmd)}")
 
     proc = subprocess.Popen(
         cmd,
         stdout=log_file,
         stderr=log_file,
-        cwd=str(account_dir)
+        env=env,
+        cwd=str(IBC_DIR)
     )
 
     logger.info(
-        f"IBC started for {account_id} "
+        f"IBC launcher started for {account_id} "
         f"(pid={proc.pid})"
     )
 
@@ -187,7 +188,7 @@ def main():
         processes.append((account_id, proc, api_port))
         api_port += 1
 
-        time.sleep(3)
+        time.sleep(5)
 
     logger.info("All IBC processes started")
 
