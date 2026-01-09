@@ -135,14 +135,16 @@ def start_ibc(account_id, account_dir, config_path):
         str(config_path),
     ]
 
-    logger.info(f"Starting IBC (Gateway) for {account_id}")
-    logger.info(f"Command: {' '.join(cmd)}")
+    env = os.environ.copy()
+    env["IBC_USE_XTERM"] = "no"   # 🔑 THIS IS THE KEY
+    env.pop("DISPLAY", None)      # let xvfb-run handle it
 
     proc = subprocess.Popen(
         cmd,
         stdout=log_file,
         stderr=log_file,
-        cwd=str(account_dir)
+        cwd=str(account_dir),
+        env=env,
     )
 
     logger.info(f"IBC launcher started for {account_id} (pid={proc.pid})")
