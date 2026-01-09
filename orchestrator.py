@@ -13,8 +13,8 @@ from logging.handlers import RotatingFileHandler
 
 BASE_DIR = Path("/opt/ib")
 
-IBC_JAR = BASE_DIR / "ibc" / "IBC.jar"
-IB_GATEWAY_DIR = BASE_DIR / "ibgateway" / "1019"
+IBC_JAR = BASE_DIR / "IBC.jar"
+IB_GATEWAY_DIR = BASE_DIR 
 
 ACCOUNTS_DIR = BASE_DIR / "accounts"
 SECRETS_DIR = BASE_DIR / "secrets"
