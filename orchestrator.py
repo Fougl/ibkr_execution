@@ -220,8 +220,8 @@ def render_config_ini(secret) -> str:
     Render IBKR IBC config.ini exactly as required.
     """
 
-    command_server_port = 7462 + int(secret.account_id)
-    twsapi_port = 4002 + int(secret.account_id)
+    command_server_port = 7462 + int(secret["account_number"])
+    twsapi_port = 4002 + int(secret["account_number"])
 
     return f"""IbLoginId={secret.username}
 IbPassword={secret.password}
