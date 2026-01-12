@@ -591,7 +591,7 @@ def apply_account_changed(args, secret_name: str) -> None:
     os.makedirs(paths["base_dir"], exist_ok=True)
 
     # Rewrite config.ini
-    cfg = render_config_ini(secret, trusted_ip=args.trusted_ip)
+    cfg = render_config_ini(secret)
     with open(paths["config_ini"], "w", encoding="utf-8") as f:
         f.write(cfg)
 
