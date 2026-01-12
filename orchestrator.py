@@ -223,13 +223,13 @@ def render_config_ini(secret) -> str:
     command_server_port = 7462 + int(secret["account_number"])
     twsapi_port = 4002 + int(secret["account_number"])
 
-    return f"""IbLoginId={secret.username}
-IbPassword={secret.password}
+    return f"""IbLoginId={secret["username"]}
+IbPassword={secret["password"]}
 SecondFactorDevice=
 ReloginAfterSecondFactorAuthenticationTimeout=yes
 SecondFactorAuthenticationExitInterval=
 SecondFactorAuthenticationTimeout=180
-TradingMode={secret.account_type}
+TradingMode={secret["account_type"]}
 AcceptNonBrokerageAccountWarning=yes
 LoginDialogDisplayTimeout=60
 ExistingSessionDetectedAction=primary
@@ -494,44 +494,7 @@ def ibapi_healthcheck(host: str, port: int, client_id: int, timeout_s: float) ->
         return False, f"ibapi exception: {e}"
 
 
-def healthcheck_gateway(secret: Dict[str, Any], timeout_s: float = 20.0) -> Tuple[bool, str]:
-    """
-    Best-effort:
-    1) CommandServerPort TCP open (IBC command server)
-    2) If ApiPort present: attempt ibapi call; if ibapi unavailable, TCP open
-    """
-    host = str(secret.get("Host", "127.0.0.1"))
-    cmd_port = int(secret["CommandServerPort"])
 
-    t0 = time.time()
-    while time.time() - t0 < timeout_s:
-        if tcp_connect_ok(host, cmd_port, timeout_s=1.0):
-            break
-        time.sleep(0.5)
-    else:
-        return False, f"CommandServerPort {cmd_port} not reachable"
-
-    api_port = determine_api_port(secret)
-    if api_port is None:
-        # We can’t do a “real API call” without knowing the port.
-        return True, f"Command server OK on {cmd_port}; no ApiPort provided (skipping API check)"
-
-    client_id = int(secret.get("ClientId", 0))
-
-    ok, msg = ibapi_healthcheck(host, api_port, client_id, timeout_s=5.0)
-    if ok:
-        return True, f"API OK on {api_port}: {msg}"
-
-    # If ibapi isn't installed, fall back to TCP port check
-    if "not installed" in msg.lower():
-        t1 = time.time()
-        while time.time() - t1 < timeout_s:
-            if tcp_connect_ok(host, api_port, timeout_s=1.0):
-                return True, f"API port {api_port} TCP open (ibapi not installed)"
-            time.sleep(0.5)
-        return False, f"API port {api_port} not reachable (and ibapi not installed)"
-
-    return False, f"API health check failed on {api_port}: {msg}"
 
 def wait_for_ib_api(
     host: str,
