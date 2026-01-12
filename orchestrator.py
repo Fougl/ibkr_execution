@@ -1,200 +1,804 @@
 #!/usr/bin/env python3
+"""
+IBKR Multi-Account Orchestrator (Phase 1)
 
-import json
-import subprocess
-import time
-import logging
-import os
-from pathlib import Path
-from logging.handlers import RotatingFileHandler
-import boto3
-from botocore.exceptions import ClientError
+- Discovers all AWS Secrets Manager secrets whose Name contains "ibkr" (case-insensitive)
+- Persists a fingerprint map locally and computes added/changed/removed each cycle
+- For each account secret:
+    - validates JSON schema (minimum required keys)
+    - renders config.ini in /srv/ibkr/accounts/<account_id>/config.ini
+    - starts /opt/ibc/gatewaystart.sh for newly added accounts
+    - runs /opt/ibc/restart.sh for changed accounts
+- Self-heals Xvfb (:1) if missing
+- Health check:
+    - If ibapi is installed: connect to TWS/Gateway API port and request current time (real API call)
+    - Otherwise: checks TCP port(s) are listening (command server + API port)
+- Logs to stdout/stderr (CloudWatch-friendly when run under systemd/agent)
 
-# =========================
-# PATHS (LOCKED)
-# =========================
-
-BASE_DIR = Path("/opt/ib")
-
-# IBC install (from your setup.yaml)
-IBC_DIR = Path("/opt/ib")
-IBC_GATEWAY_SCRIPT = IBC_DIR / "gatewaystart.sh"
-
-ACCOUNTS_DIR = BASE_DIR / "accounts"
-LOGS_DIR = BASE_DIR / "logs"
-
-BASE_API_PORT = 4001
-
-# =========================
-# LOGGING
-# =========================
-
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-logger = logging.getLogger("orchestrator")
-logger.setLevel(logging.INFO)
-
-handler = RotatingFileHandler(
-    LOGS_DIR / "orchestrator.log",
-    maxBytes=10 * 1024 * 1024,
-    backupCount=5
-)
-
-formatter = logging.Formatter(
-    "%(asctime)s | %(levelname)s | %(message)s"
-)
-
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
-# =========================
-# HELPERS
-# =========================
-
-def load_account_secrets():
-    logger.info("Discovering IBKR secrets from AWS Secrets Manager")
-
-    client = boto3.client("secretsmanager", region_name="us-east-1")
-    accounts = []
-
-    paginator = client.get_paginator("list_secrets")
-
-    for page in paginator.paginate():
-        for secret in page.get("SecretList", []):
-            name = secret["Name"]
-
-            if "ibkr" not in name.lower():
-                continue
-
-            logger.info(f"Found IBKR secret: {name}")
-
-            try:
-                response = client.get_secret_value(SecretId=name)
-            except ClientError as e:
-                logger.error(f"Failed to read secret {name}: {e}")
-                continue
-
-            secret_string = response.get("SecretString")
-            if not secret_string:
-                logger.error(f"Secret {name} has no SecretString")
-                continue
-
-            data = json.loads(secret_string)
-
-            for k in ("username", "password", "mode"):
-                if k not in data:
-                    raise RuntimeError(f"Secret {name} missing key: {k}")
-
-            data["account_id"] = name
-            accounts.append(data)
-
-    logger.info(f"Loaded {len(accounts)} IBKR account(s)")
-    return accounts
-
-
-def write_config_ini(account, account_dir, api_port):
-    config_path = account_dir / "config.ini"
-
-    logger.info(
-        f"Writing config.ini for {account['account_id']} "
-        f"(port={api_port}, mode={account['mode']})"
-    )
-
-    content = f"""
-[ibc]
-GatewayOrTws=gateway
-TradingMode={account['mode']}
-IbLoginId={account['username']}
-IbPassword={account['password']}
-
-RemotePort={api_port}
-LocalServerPort={api_port}
-
-ReadOnlyApi=no
-FixOrderIdDuplicates=yes
-AcceptNonBrokerageAccounts=yes
-LogLevel=INFO
+NOTE:
+You MUST ensure your instance has permission for ACCOUNTS_BASE (default /srv/ibkr/accounts).
+If not, set --accounts-base to a user-writable path like ~/ibkr/accounts.
 """
 
-    with open(config_path, "w") as f:
-        f.write(content.strip() + "\n")
+from __future__ import annotations
 
-    return config_path
+import argparse
+import boto3
+import hashlib
+import json
+import logging
+import os
+import re
+import signal
+import socket
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, Tuple, Set
+import subprocess
+from pathlib import Path
+from ib_insync import IB
+
+# ----------------------------
+# Defaults
+# ----------------------------
+HOME = Path.home()
+DEFAULT_DISPLAY = ":1"
+DEFAULT_XVFB_ARGS = ["Xvfb", DEFAULT_DISPLAY, "-screen", "0", "1024x768x16"]
+
+DEFAULT_ACCOUNTS_BASE = HOME /  "srv" / "ibkr" / "accounts"
+DEFAULT_STATE_FILE = os.path.expanduser("~/.ibkr/secrets_state.json")
+DEFAULT_INTERVAL = 60
+
+GATEWAY_START = HOME / "opt/ibc/gatewaystart.sh"
+GATEWAY_RESTART = HOME / "opt/ibc/restart.sh"
+GATEWAY_STOP = HOME / "opt/ibc/stop.sh"
+
+# ----------------------------
+# Logging (CloudWatch-friendly)
+# ----------------------------
+
+logger = logging.getLogger("ibkr-orchestrator")
 
 
-def start_ibc(account_id, account_dir, config_path):
-    log_dir = account_dir / "logs"
-    log_dir.mkdir(exist_ok=True)
-
-    log_file = open(log_dir / "ibc.log", "a")
-
-    cmd = [
-        "xvfb-run",
-        "-a",
-        "/opt/ib/gatewaystart.sh",
-        str(config_path),
-    ]
-
-    env = os.environ.copy()
-    env["IBC_USE_XTERM"] = "no"   # 🔑 THIS IS THE KEY
-    env.pop("DISPLAY", None)      # let xvfb-run handle it
-
-    proc = subprocess.Popen(
-        cmd,
-        stdout=log_file,
-        stderr=log_file,
-        cwd=str(account_dir),
-        env=env,
+def setup_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        stream=sys.stdout,
     )
 
-    logger.info(f"IBC launcher started for {account_id} (pid={proc.pid})")
-    return proc
+
+def log_exception(msg: str, **kv: Any) -> None:
+    # Emits stack trace + key/value context
+    context = " ".join([f"{k}={v!r}" for k, v in kv.items()])
+    logger.exception("%s %s", msg, context)
 
 
-# =========================
-# MAIN
-# =========================
+# ----------------------------
+# File lock (prevent double orchestrators)
+# ----------------------------
 
-def main():
-    logger.info("========== ORCHESTRATOR START ==========")
-
-    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
-
-    accounts = load_account_secrets()
-    if not accounts:
-        logger.error("No account secrets found — exiting")
-        raise RuntimeError("No account secrets found")
-
-    processes = []
-    api_port = BASE_API_PORT
-
-    for account in accounts:
-        account_id = account["account_id"]
-        logger.info(f"--- Account {account_id} ---")
-
-        account_dir = ACCOUNTS_DIR / account_id
-        account_dir.mkdir(parents=True, exist_ok=True)
-
-        config_path = write_config_ini(account, account_dir, api_port)
-        proc = start_ibc(account_id, account_dir, config_path)
-
-        processes.append((account_id, proc, api_port))
-        api_port += 1
-
-        time.sleep(5)
-
-    logger.info("All IBC processes started")
+def acquire_lock(lock_path: str) -> int:
+    """
+    Exclusive lock so two orchestrators don't fight.
+    Returns an open FD you must keep for the lifetime of the process.
+    """
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
 
     try:
-        while True:
-            time.sleep(10)
-    except KeyboardInterrupt:
-        logger.warning("Shutdown requested, terminating processes")
-        for account_id, proc, _ in processes:
-            logger.info(f"Stopping {account_id}")
-            proc.terminate()
+        import fcntl  # linux only
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception as e:
+        os.close(fd)
+        raise RuntimeError(f"Could not acquire lock {lock_path}: {e}") from e
 
-    logger.info("========== ORCHESTRATOR STOP ==========")
+    os.write(fd, f"pid={os.getpid()}\n".encode())
+    os.fsync(fd)
+    return fd
+
+
+# ----------------------------
+# Helpers
+# ----------------------------
+
+def atomic_write_json(path: str, obj: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+
+
+def read_json_file(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def fingerprint_secret(secret: dict) -> str:
+    normalized = json.dumps(secret, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
+
+def ensure_dir_writable(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    testfile = os.path.join(path, ".write_test")
+    with open(testfile, "w", encoding="utf-8") as f:
+        f.write("ok")
+    os.unlink(testfile)
+
+
+# ----------------------------
+# Xvfb self-healing
+# ----------------------------
+
+def ensure_xvfb(display: str, xvfb_args: list[str]) -> None:
+    # pgrep returns 0 if found, 1 if not found, >1 on error
+    pattern = rf"Xvfb\s+{re.escape(display)}\b"
+    rc = subprocess.call(
+        ["pgrep", "-f", pattern],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if rc == 0:
+        return
+
+    logger.warning("Xvfb %s not running; starting: %s", display, " ".join(xvfb_args))
+    subprocess.Popen(
+        xvfb_args,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(0.5)
+
+    rc2 = subprocess.call(
+        ["pgrep", "-f", pattern],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if rc2 != 0:
+        raise RuntimeError(f"Failed to start Xvfb on {display}")
+
+
+# ----------------------------
+# Secret schema
+# ----------------------------
+
+@dataclass
+class SecretSpec:
+    name: str
+    data: Dict[str, Any]
+    fingerprint: str
+
+
+def validate_secret_json(secret_name: str, d: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Minimal schema check:
+      Required (case-sensitive):
+        - IbLoginId (str)
+        - IbPassword (str)
+        - TradingMode (str: live|paper or similar)
+        - CommandServerPort (int or str-int)
+    Optional keys used by health check / runtime:
+        - ApiPort (int) OR TWSApiPort (int) OR TwsApiPort (int)
+        - Host (default 127.0.0.1)
+        - ClientId (default 0)
+    """
+    required = ["account_number", "username", "password", "account_type"]
+    missing = [k for k in required if k not in d]
+    if missing:
+        return False, f"Missing required keys: {missing}"
+
+    if not str(d["account_number"]).strip().isdigit():
+        return False, "account_number must be numeric"
+    if not isinstance(d["username"], str) or not d["username"].strip():
+        return False, "username must be a non-empty string"
+    if not isinstance(d["password"], str) or not d["password"].strip():
+        return False, "password must be a non-empty string"
+    if not isinstance(d.get("account_type"), str) or d["account_type"].strip().lower() not in {"live", "paper"}:
+        return False, "account_type must be 'live' or 'paper'"
+
+
+    return True, "OK"
+
+
+def render_config_ini(secret) -> str:
+    """
+    Render IBKR IBC config.ini exactly as required.
+    """
+
+    command_server_port = 7462 + int(secret.account_id)
+    twsapi_port = 4002 + int(secret.account_id)
+
+    return f"""IbLoginId={secret.username}
+IbPassword={secret.password}
+SecondFactorDevice=
+ReloginAfterSecondFactorAuthenticationTimeout=yes
+SecondFactorAuthenticationExitInterval=
+SecondFactorAuthenticationTimeout=180
+TradingMode={secret.account_type}
+AcceptNonBrokerageAccountWarning=yes
+LoginDialogDisplayTimeout=60
+ExistingSessionDetectedAction=primary
+ReadOnlyApi=no
+BypassOrderPrecautions=yes
+BypassBondWarning=yes
+BypassNegativeYieldToWorstConfirmation=yes
+BypassCalledBondWarning=yes
+BypassSameActionPairTradeWarning=yes
+BypassPriceBasedVolatilityRiskWarning=yes
+BypassUSStocksMarketDataInSharesWarning=yes
+BypassRedirectOrderWarning=yes
+BypassNoOverfillProtectionPrecaution=yes
+AutoRestartTime=10:00 PM
+ColdRestartTime=07:00 PM
+AcceptIncomingConnectionAction=reject
+CommandServerPort={command_server_port}
+OverrideTwsApiPort={twsapi_port}
+"""
+
+
+
+# ----------------------------
+# AWS secrets reconciliation (single-pass list+fingerprint)
+# ----------------------------
+
+def reconcile_ibkr_secrets(
+    region: str,
+    state_file: str,
+    name_filter_substring: str = "ibkr",
+) -> Tuple[Set[str], Set[str], Set[str], Dict[str, dict]]:
+    """
+    Returns: (added, removed, changed, new_state_map)
+
+    new_state_map is:
+    {
+        secret_name: {
+            "fingerprint": str,
+            "ibc_port": int
+        }
+    }
+    """
+    sm = boto3.client("secretsmanager", region_name=region)
+
+    # old state
+    if os.path.exists(state_file):
+        try:
+            old_state = read_json_file(state_file).get("secrets", {})
+        except Exception:
+            old_state = {}
+    else:
+        old_state = {}
+
+    new_state: Dict[str, dict] = {}
+
+    paginator = sm.get_paginator("list_secrets")
+    for page in paginator.paginate():
+        for s in page.get("SecretList", []):
+            name = s.get("Name", "")
+            if name_filter_substring.lower() not in name.lower():
+                continue
+
+            resp = sm.get_secret_value(SecretId=name)
+            secret = json.loads(resp["SecretString"])
+
+            # --- derive account_id and IBC port deterministically ---
+            raw_account = secret["account_number"]
+            if isinstance(raw_account, str):
+                account_id = int("".join(filter(str.isdigit, raw_account)))
+            else:
+                account_id = int(raw_account)
+
+            ibc_port = 7462 + account_id
+
+            new_state[name] = {
+                "fingerprint": fingerprint_secret(secret),
+                "ibc_port": ibc_port,
+            }
+
+    old_keys = set(old_state.keys())
+    new_keys = set(new_state.keys())
+
+    added = new_keys - old_keys
+    removed = old_keys - new_keys
+    changed = {
+        k
+        for k in (old_keys & new_keys)
+        if old_state[k]["fingerprint"] != new_state[k]["fingerprint"]
+    }
+
+    # persist new state atomically
+    atomic_write_json(state_file, {"secrets": new_state})
+
+    return added, removed, changed, new_state
+
+
+def load_secret(region: str, secret_name: str) -> Dict[str, Any]:
+    sm = boto3.client("secretsmanager", region_name=region)
+    resp = sm.get_secret_value(SecretId=secret_name)
+    return json.loads(resp["SecretString"])
+
+
+# ----------------------------
+# Per-account runtime.json
+# ----------------------------
+
+def runtime_path(accounts_base: str, account_id: str) -> str:
+    return os.path.join(accounts_base, account_id, "runtime.json")
+
+
+def load_runtime(accounts_base: str, account_id: str) -> dict:
+    p = runtime_path(accounts_base, account_id)
+    if not os.path.exists(p):
+        return {}
+    try:
+        return read_json_file(p)
+    except Exception:
+        return {}
+
+
+def save_runtime(accounts_base: str, account_id: str, runtime: dict) -> None:
+    p = runtime_path(accounts_base, account_id)
+    atomic_write_json(p, runtime)
+
+
+# ----------------------------
+# Process control / scripts
+# ----------------------------
+
+def build_account_paths(accounts_base: str, account_id: str) -> dict:
+    base_dir = os.path.join(accounts_base, account_id)
+    return {
+        "base_dir": base_dir,
+        "config_ini": os.path.join(base_dir, "config.ini"),
+        "logs_dir": os.path.join(base_dir, "logs"),
+        "tws_settings": os.path.join(base_dir, "tws_settings"),
+    }
+
+
+def build_env(display: str, paths: dict) -> dict:
+    env = os.environ.copy()
+    env.update({
+        "DISPLAY": display,
+        "IBC_INI": paths["config_ini"],
+        "LOG_PATH": paths["logs_dir"],
+        "TWS_SETTINGS_PATH": paths["tws_settings"],
+    })
+    os.makedirs(paths["logs_dir"], exist_ok=True)
+    os.makedirs(paths["tws_settings"], exist_ok=True)
+    return env
+
+
+def run_script(script_path: str, env: dict) -> subprocess.Popen:
+    if not os.path.exists(script_path):
+        raise FileNotFoundError(f"Script not found: {script_path}")
+    return subprocess.Popen(
+        [script_path],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def stop_account_best_effort(accounts_base: str, account_id: str) -> None:
+    """
+    Phase-1 safe-ish stop:
+    - if we recorded a pid in runtime.json, send SIGTERM
+    Otherwise just log. (IBC scripts vary; stopping cleanly is Phase 2.)
+    """
+    rt = load_runtime(accounts_base, account_id)
+    pid = rt.get("pid")
+    if not pid:
+        logger.warning("No pid recorded for account_id=%s; cannot stop automatically", account_id)
+        return
+    try:
+        os.kill(int(pid), signal.SIGTERM)
+        logger.info("Sent SIGTERM to pid=%s account_id=%s", pid, account_id)
+    except Exception as e:
+        logger.warning("Failed to stop pid=%s account_id=%s: %s", pid, account_id, e)
+
+
+# ----------------------------
+# Health checks
+# ----------------------------
+
+def tcp_connect_ok(host: str, port: int, timeout_s: float = 1.0) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True
+    except Exception:
+        return False
+
+
+def determine_api_port(secret: Dict[str, Any]) -> Optional[int]:
+    """
+    Try to find an API port in the secret.
+    If not present, we DO NOT guess aggressively; return None.
+    """
+    for k in ["ApiPort", "TWSApiPort", "TwsApiPort"]:
+        if k in secret:
+            try:
+                return int(secret[k])
+            except Exception:
+                return None
+    return None
+
+
+def ibapi_healthcheck(host: str, port: int, client_id: int, timeout_s: float) -> Tuple[bool, str]:
+    """
+    Real IB API call (if ibapi is available): connect + request current time.
+    """
+    try:
+        # Optional dependency
+        from ibapi.client import EClient
+        from ibapi.wrapper import EWrapper
+
+        class _W(EWrapper):
+            def __init__(self):
+                super().__init__()
+                self.ok = False
+                self.err: Optional[str] = None
+                self.got_time = False
+
+            def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
+                # Non-fatal errors can happen; record anyway
+                self.err = f"{errorCode}: {errorString}"
+
+            def currentTime(self, time_):
+                self.got_time = True
+
+        w = _W()
+        c = EClient(w)
+
+        c.connect(host, port, client_id)
+
+        # Small event loop
+        t0 = time.time()
+        c.reqCurrentTime()
+
+        while time.time() - t0 < timeout_s:
+            c.run()  # This blocks; IB API expects separate thread normally
+            # If we ever reach here, break (but usually run blocks)
+            break
+
+        # Fallback: if run() blocks in your env, this won't work.
+        # Therefore we also treat "connected socket + no exception" as partial success.
+        connected = c.isConnected()
+        c.disconnect()
+
+        if w.got_time:
+            return True, "ibapi currentTime OK"
+        if connected and not w.err:
+            return True, "ibapi connected OK (no currentTime)"
+        if w.err:
+            return False, f"ibapi error: {w.err}"
+        return False, "ibapi no response"
+
+    except ImportError:
+        return False, "ibapi not installed"
+    except Exception as e:
+        return False, f"ibapi exception: {e}"
+
+
+def healthcheck_gateway(secret: Dict[str, Any], timeout_s: float = 20.0) -> Tuple[bool, str]:
+    """
+    Best-effort:
+    1) CommandServerPort TCP open (IBC command server)
+    2) If ApiPort present: attempt ibapi call; if ibapi unavailable, TCP open
+    """
+    host = str(secret.get("Host", "127.0.0.1"))
+    cmd_port = int(secret["CommandServerPort"])
+
+    t0 = time.time()
+    while time.time() - t0 < timeout_s:
+        if tcp_connect_ok(host, cmd_port, timeout_s=1.0):
+            break
+        time.sleep(0.5)
+    else:
+        return False, f"CommandServerPort {cmd_port} not reachable"
+
+    api_port = determine_api_port(secret)
+    if api_port is None:
+        # We can’t do a “real API call” without knowing the port.
+        return True, f"Command server OK on {cmd_port}; no ApiPort provided (skipping API check)"
+
+    client_id = int(secret.get("ClientId", 0))
+
+    ok, msg = ibapi_healthcheck(host, api_port, client_id, timeout_s=5.0)
+    if ok:
+        return True, f"API OK on {api_port}: {msg}"
+
+    # If ibapi isn't installed, fall back to TCP port check
+    if "not installed" in msg.lower():
+        t1 = time.time()
+        while time.time() - t1 < timeout_s:
+            if tcp_connect_ok(host, api_port, timeout_s=1.0):
+                return True, f"API port {api_port} TCP open (ibapi not installed)"
+            time.sleep(0.5)
+        return False, f"API port {api_port} not reachable (and ibapi not installed)"
+
+    return False, f"API health check failed on {api_port}: {msg}"
+
+def wait_for_ib_api(
+    host: str,
+    port: int,
+    client_id: int,
+    timeout: int = 5,
+    max_wait: int = 20,
+):
+    """
+    Wait up to max_wait seconds for IB Gateway API to become available.
+    Returns (ok: bool, message: str)
+    """
+    deadline = time.time() + max_wait
+    last_error = None
+
+    while time.time() < deadline:
+        ib = IB()
+        try:
+            ib.connect(
+                host=host,
+                port=port,
+                clientId=client_id,
+                timeout=timeout,
+            )
+
+            # This is the REAL test: API + account access
+            summary = ib.accountSummary()
+            if summary:
+                ib.disconnect()
+                return True, "IB API reachable, account summary received"
+
+            ib.disconnect()
+
+        except Exception as e:
+            last_error = str(e)
+
+        time.sleep(2)
+
+    return False, f"IB API not reachable after {max_wait}s ({last_error})"
+# ----------------------------
+# Account apply logic
+# ----------------------------
+
+def apply_account_added(args, secret_name: str) -> None:
+    #account_id = account_id_from_secret_name(secret_name)
+    secret = load_secret(args.region, secret_name)
+    account_id = int(secret['account_number'])
+
+    ok, reason = validate_secret_json(secret_name, secret)
+    if not ok:
+        logger.error("Invalid secret JSON; skipping start: %s reason=%s", secret_name, reason)
+        return
+
+    paths = build_account_paths(args.accounts_base, account_id)
+    os.makedirs(paths["base_dir"], exist_ok=True)
+
+    # Write config.ini
+    cfg = render_config_ini(secret)
+    with open(paths["config_ini"], "w", encoding="utf-8") as f:
+        f.write(cfg)
+
+    env = build_env(args.display, paths)
+
+    # Start gateway
+    p = run_script(GATEWAY_START, env)
+    
+    time.sleep(5)  # small initial delay so Java can start
+
+    ok, msg = wait_for_ib_api(
+        host="127.0.0.1",
+        port=4002 + account_id,   # your rule
+        client_id=1,
+        max_wait=20,
+    )
+    
+    if ok:
+        logger.info("Gateway ready for %s: %s", secret_name, msg)
+    else:
+        logger.error("Gateway FAILED for %s: %s", secret_name, msg)
+    
+
+
+def apply_account_changed(args, secret_name: str) -> None:
+    #account_id = account_id_from_secret_name(secret_name)
+    secret = load_secret(args.region, secret_name)
+    account_id = int(secret['account_number'])
+
+    ok, reason = validate_secret_json(secret_name, secret)
+    if not ok:
+        logger.error("Invalid secret JSON; skipping restart: %s reason=%s", secret_name, reason)
+        return
+
+    paths = build_account_paths(args.accounts_base, account_id)
+    os.makedirs(paths["base_dir"], exist_ok=True)
+
+    # Rewrite config.ini
+    cfg = render_config_ini(secret, trusted_ip=args.trusted_ip)
+    with open(paths["config_ini"], "w", encoding="utf-8") as f:
+        f.write(cfg)
+
+    env = build_env(args.display, paths)
+
+    # Restart gateway
+    p = run_script(GATEWAY_RESTART, env)
+    
+    time.sleep(5)  # small initial delay so Java can start
+
+    ok, msg = wait_for_ib_api(
+        host="127.0.0.1",
+        port=4002 + account_id,   # your rule
+        client_id=1,
+        max_wait=20,
+    )
+    
+    if ok:
+        logger.info("Gateway ready for %s: %s", secret_name, msg)
+    else:
+        logger.error("Gateway FAILED for %s: %s", secret_name, msg)
+
+    
+
+
+def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
+    entry = old_state.get(secret_name)
+
+    if not entry:
+        logger.warning(
+            "Secret removed: %s but no local state found – nothing to stop",
+            secret_name,
+        )
+        return
+
+    ibc_port = entry["ibc_port"]
+
+    logger.warning(
+        "Secret removed: %s -> stopping IBC on port %s (Phase 1)",
+        secret_name,
+        ibc_port,
+    )
+
+    env = os.environ.copy()
+    env["IBC_COMMAND_PORT"] = str(ibc_port)
+
+    subprocess.run(
+        ["/opt/ibc/stop.sh"],
+        env=env,
+        check=False,
+    )
+
+
+# ----------------------------
+# Main
+# ----------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("region", help="AWS region, e.g. us-east-1")
+    p.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help="Poll interval seconds")
+    p.add_argument("--state-file", default=DEFAULT_STATE_FILE, help="Local persistence json path")
+    p.add_argument("--accounts-base", default=DEFAULT_ACCOUNTS_BASE, help="Base dir for per-account state")
+    p.add_argument("--filter", default="ibkr", help="Substring filter for Secrets Manager secret names")
+    p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
+    p.add_argument("--display", default=DEFAULT_DISPLAY, help="X display for Xvfb")
+    p.add_argument("--health-timeout", type=float, default=20.0, help="Seconds to wait for gateway health")
+    p.add_argument("--trusted-ip", default=None, help='Optional TrustedTwsApiClientIPs value to inject if missing')
+    p.add_argument("--lock-file", default=os.path.expanduser("~/.ibkr/orchestrator.lock"), help="Lock file path")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    setup_logging(args.log_level)
+
+    # Lock
+    try:
+        _lock_fd = acquire_lock(args.lock_file)
+    except Exception as e:
+        logger.error("Another orchestrator may already be running: %s", e)
+        sys.exit(2)
+
+    # Ensure directories are writable
+    try:
+        os.makedirs(os.path.dirname(args.state_file), exist_ok=True)
+    except Exception as e:
+        logger.error("Cannot create state dir for %s: %s", args.state_file, e)
+        sys.exit(2)
+
+    try:
+        ensure_dir_writable(args.accounts_base)
+    except Exception:
+        # If /srv is not writable, fail fast with a clear message
+        logger.error(
+            "accounts-base is not writable: %s. "
+            "Either: sudo mkdir -p %s && sudo chown -R $USER:$USER %s "
+            "OR run with --accounts-base ~/ibkr/accounts",
+            args.accounts_base, args.accounts_base, args.accounts_base
+        )
+        sys.exit(2)
+
+    xvfb_args = ["Xvfb", args.display, "-screen", "0", "1024x768x16"]
+
+    # Fail-fast baseline
+    try:
+        ensure_xvfb(args.display, xvfb_args)
+    except Exception:
+        log_exception("Failed to ensure Xvfb baseline")
+        sys.exit(2)
+
+    logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
+
+    while True:
+        cycle_ok = True
+
+        try:
+            # Self-heal Xvfb each cycle
+            ensure_xvfb(args.display, xvfb_args)
+            if os.path.exists(args.state_file):
+                old_state = read_json_file(args.state_file).get("secrets", {})
+            else:
+                old_state = {}
+            added, removed, changed, _new_state = reconcile_ibkr_secrets(
+                region=args.region,
+                state_file=args.state_file,
+                name_filter_substring=args.filter,
+            )
+
+            if added:
+                logger.info("Secrets added: %s", sorted(list(added)))
+            if changed:
+                logger.info("Secrets changed: %s", sorted(list(changed)))
+            if removed:
+                logger.info("Secrets removed: %s", sorted(list(removed)))
+
+            # Apply changes
+            for sname in sorted(list(added)):
+                try:
+                    apply_account_added(args, sname)
+                except Exception:
+                    cycle_ok = False
+                    log_exception("Failed handling added secret", secret=sname)
+
+            for sname in sorted(list(changed)):
+                try:
+                    apply_account_changed(args, sname)
+                except Exception:
+                    cycle_ok = False
+                    log_exception("Failed handling changed secret", secret=sname)
+
+            for sname in sorted(list(removed)):
+                try:
+                    apply_account_removed(args, sname, old_state)
+                except Exception:
+                    cycle_ok = False
+                    log_exception("Failed handling removed secret", secret=sname)
+
+        except Exception:
+            cycle_ok = False
+            log_exception("Reconcile cycle failed")
+
+        # Final “cycle” report:
+        # CloudWatch will capture these logs if you're running under a service/agent.
+        if cycle_ok:
+            logger.info("Reconcile cycle completed successfully (no unhandled errors)")
+        else:
+            logger.error("Reconcile cycle completed with errors (see logs above)")
+
+        time.sleep(max(5, args.interval))
 
 
 if __name__ == "__main__":
