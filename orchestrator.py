@@ -585,7 +585,7 @@ def apply_account_added(args, secret_name: str) -> None:
         logger.error("Invalid secret JSON; skipping start: %s reason=%s", secret_name, reason)
         return
 
-    paths = build_account_paths(args.accounts_base, account_id)
+    paths = build_account_paths(args.accounts_base, str(account_id))
     os.makedirs(paths["base_dir"], exist_ok=True)
 
     # Write config.ini
@@ -624,7 +624,7 @@ def apply_account_changed(args, secret_name: str) -> None:
         logger.error("Invalid secret JSON; skipping restart: %s reason=%s", secret_name, reason)
         return
 
-    paths = build_account_paths(args.accounts_base, account_id)
+    paths = build_account_paths(args.accounts_base, str(account_id))
     os.makedirs(paths["base_dir"], exist_ok=True)
 
     # Rewrite config.ini
