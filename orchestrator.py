@@ -47,13 +47,13 @@ HOME = Path.home()
 DEFAULT_DISPLAY = ":1"
 DEFAULT_XVFB_ARGS = ["Xvfb", DEFAULT_DISPLAY, "-screen", "0", "1024x768x16"]
 
-DEFAULT_ACCOUNTS_BASE = HOME /  "srv" / "ibkr" / "accounts"
+DEFAULT_ACCOUNTS_BASE = "srv" / "ibkr" / "accounts"
 DEFAULT_STATE_FILE = os.path.expanduser("~/.ibkr/secrets_state.json")
 DEFAULT_INTERVAL = 60
 
-GATEWAY_START = HOME / "opt/ibc/gatewaystart.sh"
-GATEWAY_RESTART = HOME / "opt/ibc/restart.sh"
-GATEWAY_STOP = HOME / "opt/ibc/stop.sh"
+GATEWAY_START = "opt/ibc/gatewaystart.sh"
+GATEWAY_RESTART = "opt/ibc/restart.sh"
+GATEWAY_STOP = "opt/ibc/stop.sh"
 
 # ----------------------------
 # Logging (CloudWatch-friendly)
