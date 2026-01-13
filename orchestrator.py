@@ -412,88 +412,6 @@ def stop_account_best_effort(accounts_base: str, account_id: str) -> None:
         logger.warning("Failed to stop pid=%s account_id=%s: %s", pid, account_id, e)
 
 
-# ----------------------------
-# Health checks
-# ----------------------------
-
-def tcp_connect_ok(host: str, port: int, timeout_s: float = 1.0) -> bool:
-    try:
-        with socket.create_connection((host, port), timeout=timeout_s):
-            return True
-    except Exception:
-        return False
-
-
-def determine_api_port(secret: Dict[str, Any]) -> Optional[int]:
-    """
-    Try to find an API port in the secret.
-    If not present, we DO NOT guess aggressively; return None.
-    """
-    for k in ["ApiPort", "TWSApiPort", "TwsApiPort"]:
-        if k in secret:
-            try:
-                return int(secret[k])
-            except Exception:
-                return None
-    return None
-
-
-def ibapi_healthcheck(host: str, port: int, client_id: int, timeout_s: float) -> Tuple[bool, str]:
-    """
-    Real IB API call (if ibapi is available): connect + request current time.
-    """
-    try:
-        # Optional dependency
-        from ibapi.client import EClient
-        from ibapi.wrapper import EWrapper
-
-        class _W(EWrapper):
-            def __init__(self):
-                super().__init__()
-                self.ok = False
-                self.err: Optional[str] = None
-                self.got_time = False
-
-            def error(self, reqId, errorCode, errorString, advancedOrderRejectJson=""):
-                # Non-fatal errors can happen; record anyway
-                self.err = f"{errorCode}: {errorString}"
-
-            def currentTime(self, time_):
-                self.got_time = True
-
-        w = _W()
-        c = EClient(w)
-
-        c.connect(host, port, client_id)
-
-        # Small event loop
-        t0 = time.time()
-        c.reqCurrentTime()
-
-        while time.time() - t0 < timeout_s:
-            c.run()  # This blocks; IB API expects separate thread normally
-            # If we ever reach here, break (but usually run blocks)
-            break
-
-        # Fallback: if run() blocks in your env, this won't work.
-        # Therefore we also treat "connected socket + no exception" as partial success.
-        connected = c.isConnected()
-        c.disconnect()
-
-        if w.got_time:
-            return True, "ibapi currentTime OK"
-        if connected and not w.err:
-            return True, "ibapi connected OK (no currentTime)"
-        if w.err:
-            return False, f"ibapi error: {w.err}"
-        return False, "ibapi no response"
-
-    except ImportError:
-        return False, "ibapi not installed"
-    except Exception as e:
-        return False, f"ibapi exception: {e}"
-
-
 
 
 def wait_for_ib_api(
@@ -509,27 +427,28 @@ def wait_for_ib_api(
     """
     deadline = time.time() + max_wait
     last_error = None
+    time.sleep(max_wait)
+    #while True:
+    ib = IB()
+    try:
+        ib.connect(
+            host=host,
+            port=port,
+            clientId=client_id,
+            timeout=timeout,
+        )
 
-    while time.time() < deadline:
-        ib = IB()
-        try:
-            ib.connect(
-                host=host,
-                port=port,
-                clientId=client_id,
-                timeout=timeout,
-            )
-
-            # This is the REAL test: API + account access
-            summary = ib.accountSummary()
-            if summary:
-                ib.disconnect()
-                return True, "IB API reachable, account summary received"
-
+        # This is the REAL test: API + account access
+        summary = ib.accountSummary()
+        if summary:
             ib.disconnect()
+            return True, "IB API reachable, account summary received"
 
-        except Exception as e:
-            last_error = str(e)
+        ib.disconnect()
+        #break
+
+    except Exception as e:
+        last_error = str(e)
 
         time.sleep(2)
 
@@ -561,7 +480,7 @@ def apply_account_added(args, secret_name: str) -> None:
     # Start gateway
     p = run_script(GATEWAY_START, env)
     
-    time.sleep(5)  # small initial delay so Java can start
+    time.sleep(30)  # small initial delay so Java can start
 
     ok, msg = wait_for_ib_api(
         host="127.0.0.1",
@@ -577,8 +496,15 @@ def apply_account_added(args, secret_name: str) -> None:
     
 
 
-def apply_account_changed(args, secret_name: str) -> None:
+def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     #account_id = account_id_from_secret_name(secret_name)
+    entry = old_state.get(secret_name)
+    if not entry:
+        logger.warning(
+            "Secret changed: %s but no local state found – nothing to change",
+            secret_name,
+        )
+        return
     secret = load_secret(args.region, secret_name)
     account_id = int(secret['account_number'])
 
@@ -599,6 +525,17 @@ def apply_account_changed(args, secret_name: str) -> None:
 
     # Restart gateway
     p = run_script(GATEWAY_RESTART, env)
+    
+    ibc_port = entry["ibc_port"]
+
+    logger.warning(
+        "Secret removed: %s -> stopping IBC on port %s (Phase 1)",
+        secret_name,
+        ibc_port,
+    )
+
+    env = os.environ.copy()
+    env["COMMAND_SERVER_PORT"] = str(ibc_port)
     
     time.sleep(5)  # small initial delay so Java can start
 
@@ -636,7 +573,7 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
     )
 
     env = os.environ.copy()
-    env["IBC_COMMAND_PORT"] = str(ibc_port)
+    env["COMMAND_SERVER_PORT"] = str(ibc_port)
 
     subprocess.run(
         ["/opt/ibc/stop.sh"],
@@ -644,7 +581,70 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
         check=False,
     )
 
+def force_start_or_restart_all_secrets(args) -> None:
+    sm = boto3.client("secretsmanager", region_name=args.region)
 
+    paginator = sm.get_paginator("list_secrets")
+
+    for page in paginator.paginate():
+        for s in page.get("SecretList", []):
+            secret_name = s.get("Name", "")
+
+            if args.filter.lower() not in secret_name.lower():
+                continue
+
+            try:
+                logger.info("Ensuring gateway for secret=%s", secret_name)
+
+                secret = load_secret(args.region, secret_name)
+                account_id = int(secret["account_number"])
+
+                ok, reason = validate_secret_json(secret_name, secret)
+                if not ok:
+                    logger.error("Invalid secret %s: %s", secret_name, reason)
+                    continue
+
+                paths = build_account_paths(args.accounts_base, str(account_id))
+                os.makedirs(paths["base_dir"], exist_ok=True)
+
+                # Always rewrite config
+                cfg = render_config_ini(secret)
+                with open(paths["config_ini"], "w", encoding="utf-8") as f:
+                    f.write(cfg)
+
+                # Build FULL env (this is critical)
+                env = build_env(args.display, paths)
+                env["COMMAND_SERVER_PORT"] = str(7462 + account_id)
+
+                # Try start
+                p = subprocess.run(
+                    [GATEWAY_START],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+
+                out = (p.stdout or "").lower()
+
+                if "process is already running" in out:
+                    logger.warning(
+                        "Gateway already running for %s",
+                        secret_name,
+                    )
+
+                #     subprocess.run(
+                #         [GATEWAY_RESTART],
+                #         env=env,
+                #         stdout=subprocess.DEVNULL,
+                #         stderr=subprocess.DEVNULL,
+                #         check=False,
+                #     )
+                # else:
+                #     logger.info("Gateway start attempted for %s", secret_name)
+
+            except Exception:
+                log_exception("Failed force start/restart", secret=secret_name)
 # ----------------------------
 # Main
 # ----------------------------
@@ -704,6 +704,8 @@ def main() -> None:
         sys.exit(2)
 
     logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
+    logger.warning("Cold start detected → force start/restart all gateways")
+    force_start_or_restart_all_secrets(args)
 
     while True:
         cycle_ok = True
@@ -756,10 +758,10 @@ def main() -> None:
 
         # Final “cycle” report:
         # CloudWatch will capture these logs if you're running under a service/agent.
-        if cycle_ok:
-            logger.info("Reconcile cycle completed successfully (no unhandled errors)")
-        else:
-            logger.error("Reconcile cycle completed with errors (see logs above)")
+        # if cycle_ok:
+        #     logger.info("Reconcile cycle completed successfully (no unhandled errors)")
+        # else:
+        #     logger.error("Reconcile cycle completed with errors (see logs above)")
 
         time.sleep(max(5, args.interval))
 
