@@ -651,17 +651,34 @@ def force_start_or_restart_all_secrets(args) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("region", help="AWS region, e.g. us-east-1")
-    p.add_argument("--interval", type=int, default=DEFAULT_INTERVAL, help="Poll interval seconds")
-    p.add_argument("--state-file", default=DEFAULT_STATE_FILE, help="Local persistence json path")
-    p.add_argument("--accounts-base", default=DEFAULT_ACCOUNTS_BASE, help="Base dir for per-account state")
-    p.add_argument("--filter", default="ibkr", help="Substring filter for Secrets Manager secret names")
-    p.add_argument("--log-level", default="INFO", help="DEBUG|INFO|WARNING|ERROR")
-    p.add_argument("--display", default=DEFAULT_DISPLAY, help="X display for Xvfb")
-    p.add_argument("--health-timeout", type=float, default=20.0, help="Seconds to wait for gateway health")
-    p.add_argument("--trusted-ip", default=None, help='Optional TrustedTwsApiClientIPs value to inject if missing')
-    p.add_argument("--lock-file", default=os.path.expanduser("~/.ibkr/orchestrator.lock"), help="Lock file path")
-    return p.parse_args()
+
+    # 🔹 Make region OPTIONAL positional
+    p.add_argument(
+        'region',
+        nargs='?',
+        default=None,
+        help="AWS region (defaults to boto3 resolved region)"
+    )
+
+    p.add_argument('--interval', type=int, default=DEFAULT_INTERVAL)
+    p.add_argument('--state-file', default=DEFAULT_STATE_FILE)
+    p.add_argument('--accounts-base', default=DEFAULT_ACCOUNTS_BASE)
+    p.add_argument('--filter', default='ibkr')
+    p.add_argument('--log-level', default='INFO')
+    p.add_argument('--display', default=DEFAULT_DISPLAY)
+    p.add_argument('--health-timeout', type=float, default=20.0)
+    p.add_argument('--trusted-ip', default=None)
+    p.add_argument('--lock-file', default=os.path.expanduser("~/.ibkr/orchestrator.lock"))
+
+    args = p.parse_args()
+
+    if args.region is None:
+        session = boto3.Session()
+        if not session.region_name:
+            raise RuntimeError("AWS region could not be resolved from environment / metadata")
+        args.region = session.region_name
+
+    return args
 
 
 def main() -> None:
