@@ -626,7 +626,7 @@ def force_start_or_restart_all_secrets(args) -> None:
                     start_new_session=True,
                 )
 
-                out = (p.stdout or "").lower()
+                #out = (p.stdout or "").lower()
 
                 logger.info(
                     "Gateway start triggered for %s (pid=%s)",
