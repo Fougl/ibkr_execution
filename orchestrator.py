@@ -617,12 +617,13 @@ def force_start_or_restart_all_secrets(args) -> None:
                 env["COMMAND_SERVER_PORT"] = str(7462 + account_id)
 
                 # Try start
-                p = subprocess.run(
+                p = subprocess.Popen(
                     [GATEWAY_START],
                     env=env,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    start_new_session=True,
                 )
 
                 out = (p.stdout or "").lower()
