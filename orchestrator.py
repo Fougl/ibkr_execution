@@ -628,11 +628,11 @@ def force_start_or_restart_all_secrets(args) -> None:
 
                 out = (p.stdout or "").lower()
 
-                if "process is already running" in out:
-                    logger.warning(
-                        "Gateway already running for %s",
-                        secret_name,
-                    )
+                logger.info(
+                    "Gateway start triggered for %s (pid=%s)",
+                    secret_name,
+                    p.pid,
+                )
 
                 #     subprocess.run(
                 #         [GATEWAY_RESTART],
