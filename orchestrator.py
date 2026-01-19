@@ -244,7 +244,7 @@ BypassUSStocksMarketDataInSharesWarning=yes
 BypassRedirectOrderWarning=yes
 BypassNoOverfillProtectionPrecaution=yes
 AutoRestartTime=10:00 PM
-ColdRestartTime=07:00 PM
+ColdRestartTime=15:00
 AcceptIncomingConnectionAction=reject
 CommandServerPort={command_server_port}
 OverrideTwsApiPort={twsapi_port}
@@ -529,7 +529,7 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     ibc_port = entry["ibc_port"]
 
     logger.warning(
-        "Secret removed: %s -> stopping IBC on port %s (Phase 1)",
+        "Secret changed: %s -> restarting IBC on port %s (Phase 1)",
         secret_name,
         ibc_port,
     )
@@ -620,9 +620,9 @@ def force_start_or_restart_all_secrets(args) -> None:
                 p = subprocess.Popen(
                     [GATEWAY_START],
                     env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    #text=True,
                     start_new_session=True,
                 )
 
@@ -685,7 +685,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_logging(args.log_level)
-
+    logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
     # Lock
     try:
         _lock_fd = acquire_lock(args.lock_file)
@@ -722,7 +722,7 @@ def main() -> None:
         sys.exit(2)
 
     logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
-    logger.warning("Cold start detected → force start/restart all gateways")
+    #logger.warning("Cold start detected → force start/restart all gateways")
     force_start_or_restart_all_secrets(args)
 
     while True:
