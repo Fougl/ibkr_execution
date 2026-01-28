@@ -64,7 +64,7 @@ from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  
 # ---------------------------
 # Config (ENV)
 # ---------------------------
-LOG_PATH = os.getenv("EXECUTOR_LOG_PATH", "/opt/ibc/execution/executor_webhooks.log")
+LOG_PATH = os.getenv("EXECUTOR_LOG_PATH", "/opt/ibc/execution/executor.log")
 STATE_PATH = os.getenv("EXECUTOR_STATE_PATH", "/opt/ibc/execution/executor_state.json")
 
 # DynamoDB settings
@@ -638,7 +638,8 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
 # ---------------------------
 def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    
+    logger.info("Preclose potential position closing")
+
 
     dayk = state_key_for_day(now_local.date())
 
@@ -701,7 +702,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
 def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    
+    logger.info("Postopen potential position reopen")
 
     dayk = state_key_for_day(now_local.date())
 
