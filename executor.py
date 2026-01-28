@@ -58,7 +58,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import pytz
 from flask import Flask, jsonify, request
-from ib_insync import IB, MarketOrder, Contract, Future  # type: ignore
+from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
 
 
 # ---------------------------
@@ -385,8 +385,15 @@ class Signal:
     desired_direction: int  # +1 long, -1 short, 0 exit/flat
     desired_qty: int
     raw_alert: str
+    take_profit: float | None = None
+    stop_loss: float | None = None
+    target_percentage: float | None = None
+    signal_timestamp: float | None = None
+    risk_valid: bool | None = None 
 
 
+
+    
 def parse_signal(payload: Dict[str, Any]) -> Signal:
     alert = str(payload.get("alert", "")).strip()
     symbol = str(payload.get("symbol", "")).strip()
@@ -397,53 +404,98 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
 
     a = alert.lower()
 
-    qty = payload.get("qty", payload.get("quantity", DEFAULT_QTY))
+    # NEW: read signal timestamp from JSON
+    signal_ts = payload.get("signalTimestamp")
+    try:
+        signal_ts = float(signal_ts)
+        signal_ts = parse_timestamp(signal_ts)
+    except:
+        signal_ts = None
+
+    # Accept qty aliases: qty / quantity / size
+    qty = payload.get("qty", payload.get("quantity", payload.get("size", DEFAULT_QTY)))
     try:
         qty_i = int(qty)
     except Exception:
         qty_i = DEFAULT_QTY
 
-    if "exit" in a and "long" in a:
-        return Signal(symbol=symbol, desired_direction=0, desired_qty=0, raw_alert=alert)
-    if "exit" in a and "short" in a:
-        return Signal(symbol=symbol, desired_direction=0, desired_qty=0, raw_alert=alert)
+    def _to_float(v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            s = str(v).strip()
+            if s == "":
+                return None
+            return float(s)
+        except Exception:
+            return None
 
-    if ("enter" in a and "long" in a) or a in ("long", "buy", "enter long"):
-        return Signal(symbol=symbol, desired_direction=+1, desired_qty=qty_i, raw_alert=alert)
-    if ("enter" in a and "short" in a) or a in ("short", "sell", "enter short"):
-        return Signal(symbol=symbol, desired_direction=-1, desired_qty=qty_i, raw_alert=alert)
+    take_profit = _to_float(payload.get("takeProfit"))
+    stop_loss = _to_float(payload.get("stopLoss"))
+    target_pct = _to_float(payload.get("targetPercentage"))
+    risk_ok = (
+    (take_profit is not None and stop_loss is not None)
+    or
+    (target_pct is not None and stop_loss is not None)
+    )
+
+    # Exits
+    if "exit" in a and "long" in a:
+        return Signal(
+            symbol=symbol,
+            desired_direction=0,
+            desired_qty=0,
+            raw_alert=alert,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            target_percentage=target_pct,
+            signal_timestamp=signal_ts  # ⭐ ADD HERE
+        )
+
+    if "exit" in a and "short" in a:
+        return Signal(
+            symbol=symbol,
+            desired_direction=0,
+            desired_qty=0,
+            raw_alert=alert,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            target_percentage=target_pct,
+            signal_timestamp=signal_ts  # ⭐ ADD HERE
+        )
+
+    # Long entries
+    if ("entry" in a and "long" in a) or ("enter" in a and "long" in a) or a in ("long", "buy", "enter long", "entry long"):
+        return Signal(
+            symbol=symbol,
+            desired_direction=+1,
+            desired_qty=qty_i,
+            raw_alert=alert,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            target_percentage=target_pct,
+            signal_timestamp=signal_ts,   # ⭐ ADD HERE
+            risk_valid=risk_ok
+        )
+
+    # Short entries
+    if ("entry" in a and "short" in a) or ("enter" in a and "short" in a) or a in ("short", "sell", "enter short", "entry short"):
+        return Signal(
+            symbol=symbol,
+            desired_direction=-1,
+            desired_qty=qty_i,
+            raw_alert=alert,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            target_percentage=target_pct,
+            signal_timestamp=signal_ts,
+            risk_valid=risk_ok# ⭐ ADD HERE
+        )
 
     raise ValueError(f"Unrecognized alert format: '{alert}'")
 
 
-# ---------------------------
-# Dedupe
-# ---------------------------
-class DedupeCache:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._seen: Dict[str, float] = {}
-
-    def seen_recently(self, key: str) -> bool:
-        now = time.time()
-        with self._lock:
-            for k, ts in list(self._seen.items()):
-                if now - ts > DEDUPE_TTL_SEC:
-                    self._seen.pop(k, None)
-            if key in self._seen:
-                return True
-            self._seen[key] = now
-            return False
-
-
-dedupe_cache = DedupeCache()
-
-
-def webhook_dedupe_key(payload: Dict[str, Any]) -> str:
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
+        
 # ---------------------------
 # IB helpers (per-account IB instance; no shared global IB)
 # ---------------------------
@@ -460,9 +512,9 @@ def current_position_qty(ib: IB, contract: Contract) -> int:
             if getattr(p.contract, "conId", None) and getattr(contract, "conId", None):
                 if p.contract.conId == contract.conId:
                     qty += int(p.position)
-            else:
-                if p.contract.symbol == getattr(contract, "symbol", None) and p.contract.secType == contract.secType:
-                    qty += int(p.position)
+            # else:
+            #     if p.contract.symbol == getattr(contract, "symbol", None) and p.contract.secType == contract.secType:
+            #         qty += int(p.position)
         except Exception:
             continue
     return qty
@@ -484,6 +536,93 @@ def open_position(ib: IB, contract: Contract, direction: int, qty: int) -> None:
     ib.placeOrder(contract, order)
 
 
+
+def open_position_with_brackets(
+    ib: IB,
+    contract: Contract,
+    direction: int,
+    qty: int,
+    take_profit: float | None,
+    stop_loss: float | None,
+    target_percentage: float | None,
+) -> None:
+    """
+    Places a MARKET entry and then (optionally) places TP/SL as OCA child orders.
+    - take_profit / stop_loss are interpreted as PRICE OFFSETS (e.g. 1.0 = 1.0 points).
+    - target_percentage is interpreted as % of filled entry price (used only if take_profit is not provided).
+    """
+    # If no risk params provided, keep original behavior
+    if take_profit is None and stop_loss is None and target_percentage is None:
+        open_position(ib, contract, direction, qty)
+        return
+
+    # 1) Market entry
+    action = "BUY" if direction > 0 else "SELL"
+    parent = MarketOrder(action, abs(int(qty)))
+    trade = ib.placeOrder(contract, parent)
+
+    # Wait for fill to get avgFillPrice
+    t0 = time.time()
+    fill_price = 0.0
+    while time.time() - t0 < 20:
+        ib.waitOnUpdate(timeout=1)
+        try:
+            fill_price = float(getattr(trade.orderStatus, "avgFillPrice", 0) or 0)
+        except Exception:
+            fill_price = 0.0
+        if fill_price > 0:
+            break
+
+    if fill_price <= 0:
+        # If we couldn't get a fill price, fall back to original behavior (no brackets)
+        logger.warning("Entry filled price unavailable; skipping TP/SL placement.")
+        return
+
+    # Derive TP offset if targetPercentage provided and takeProfit absent
+    tp_offset = take_profit
+    if tp_offset is None and target_percentage is not None:
+        tp_offset = abs(fill_price) * (float(target_percentage) / 100.0)
+
+    sl_offset = stop_loss
+
+    # Nothing to place
+    if tp_offset is None and sl_offset is None:
+        return
+
+    # Compute TP/SL absolute prices
+    # Long: TP above, SL below. Short: TP below, SL above.
+    tp_price = None
+    sl_price = None
+    if tp_offset is not None:
+        tp_price = fill_price + (direction * float(tp_offset))
+    if sl_offset is not None:
+        sl_price = fill_price - (direction * float(sl_offset))
+
+    # 2) Place OCA TP/SL orders
+    exit_action = "SELL" if direction > 0 else "BUY"
+    oca = f"OCA_{int(time.time()*1000)}_{os.getpid()}"
+
+    if tp_price is not None:
+        tp_order = LimitOrder(exit_action, abs(int(qty)), float(tp_price))
+        tp_order.ocaGroup = oca
+        tp_order.ocaType = 1
+        tp_order.transmit = False
+        ib.placeOrder(contract, tp_order)
+
+    if sl_price is not None:
+        sl_order = StopOrder(exit_action, abs(int(qty)), float(sl_price))
+        sl_order.ocaGroup = oca
+        sl_order.ocaType = 1
+        sl_order.transmit = True
+        ib.placeOrder(contract, sl_order)
+
+    logger.info(
+        f"Placed TP/SL OCA={oca} fill={fill_price} "
+        f"tp={tp_price if tp_price is not None else 'none'} "
+        f"sl={sl_price if sl_price is not None else 'none'}"
+    )
+
+
 def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
     for i in range(MAX_STATE_CHECKS):
         qty = current_position_qty(ib, contract)
@@ -499,11 +638,7 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
 # ---------------------------
 def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    _, close_dt, preclose_dt, _ = market_datetimes(now_local, settings)
-
-    # Only act between preclose_dt and close_dt
-    if not (preclose_dt <= now_local < close_dt):
-        return
+    
 
     dayk = state_key_for_day(now_local.date())
 
@@ -566,11 +701,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
 def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    open_dt, close_dt, _, reopen_dt = market_datetimes(now_local, settings)
-
-    # Only act between reopen_dt and close_dt
-    if not (reopen_dt <= now_local < close_dt):
-        return
+    
 
     dayk = state_key_for_day(now_local.date())
 
@@ -634,14 +765,45 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
             logger.exception(f"Postopen error acct={acc.account_number}: {e}")
 
 
+def parse_timestamp(value) -> float | None:
+    """
+    Accepts:
+      - UNIX seconds (1706400000)
+      - UNIX milliseconds (1706400000000)
+      - ISO8601 datetime ("2025-01-27T13:15:02Z")
+    Returns float UNIX seconds or None.
+    """
+    if value is None:
+        return None
+
+    # If numeric → may be seconds or ms
+    try:
+        v = float(value)
+        # Heuristic: if too large → it's ms
+        if v > 1e12:  # more than 10^12 → ms
+            return v / 1000.0
+        if v > 1e10:  # also ms range
+            return v / 1000.0
+        if v > 1e5:   # valid seconds
+            return v
+    except:
+        pass
+
+    # Try ISO8601
+    try:
+        from datetime import datetime
+        # Auto ISO8601 detection
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt.timestamp()
+    except:
+        return None
+
+
 # ---------------------------
 # Per-account signal execution
 # ---------------------------
 def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings) -> Dict[str, Any]:
-    """
-    Executes signal for ONE account. Intended to run in parallel across accounts.
-    """
-    result: Dict[str, Any] = {
+    result = {
         "account_number": acc.account_number,
         "secret_name": acc.secret_name,
         "api_port": acc.api_port,
@@ -651,66 +813,167 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
     try:
         ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
 
-        # Build and qualify contract
         contract = build_contract(sig.symbol)
         ib.qualifyContracts(contract)
 
         qty = current_position_qty(ib, contract)
-        logger.info(f"acct={acc.account_number} state_before symbol={sig.symbol} alert={sig.raw_alert} qty={qty}")
+        logger.info(f"acct={acc.account_number} BEFORE symbol={sig.symbol} "
+                    f"alert={sig.raw_alert} qty={qty}")
 
-        # Exit
+        # ----------------------------------------------------------
+        # NEW: latency check (using auto-detected timestamp)
+        # ----------------------------------------------------------
+        now_ts = time.time()
+        sig_age = None
+        if sig.signal_timestamp:
+            try:
+                sig_age = now_ts - sig.signal_timestamp
+            except:
+                sig_age = None
+
+        allow_entry = True
+        if sig.desired_direction != 0 and sig_age is not None:
+            if sig_age > int(settings.execution_delay):
+                allow_entry = False
+
+        # ----------------------------------------------------------
+        # EXIT (ALWAYS perform exit, ignore latency)
+        # ----------------------------------------------------------
         if sig.desired_direction == 0:
             if qty == 0:
                 result.update({"ok": True, "action": "none_already_flat"})
                 ib.disconnect()
                 return result
 
+            # Close existing position
             close_position(ib, contract, qty)
-            time.sleep(max(1, int(settings.execution_delay)))
+            time.sleep(1)
 
+            # Retry logic
             if not wait_until_flat(ib, contract, settings):
-                result.update({"ok": False, "action": "exit_pending_not_confirmed"})
-                ib.disconnect()
-                return result
+                logger.warning("Exit close not reflected — retrying")
+                close_position(ib, contract, qty)
+                time.sleep(1)
+
+                if not wait_until_flat(ib, contract, settings):
+                    result.update({"ok": False, "action": "exit_failed_after_retry"})
+                    ib.disconnect()
+                    return result
 
             result.update({"ok": True, "action": "exit_closed"})
             ib.disconnect()
             return result
 
-        # Entry / reversal
+        # ----------------------------------------------------------
+        # SAME DIRECTION → NO-OP
+        # ----------------------------------------------------------
         desired_dir = sig.desired_direction
         desired_qty = sig.desired_qty if sig.desired_qty > 0 else DEFAULT_QTY
 
-        # same direction -> no-op
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
             result.update({"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
             ib.disconnect()
             return result
 
-        # opposite direction -> close then open
+        # ----------------------------------------------------------
+        # REVERSAL (close ALWAYS, but entry obeys latency)
+        # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             close_position(ib, contract, qty)
-            time.sleep(max(1, int(settings.execution_delay)))
+            time.sleep(1)
 
+            # Retry close
             if not wait_until_flat(ib, contract, settings):
-                result.update({"ok": False, "action": "reversal_close_not_confirmed"})
+                logger.warning("Reversal close not reflected — retrying")
+                close_position(ib, contract, qty)
+                time.sleep(1)
+
+                if not wait_until_flat(ib, contract, settings):
+                    result.update({"ok": False, "action": "reversal_close_not_confirmed"})
+                    ib.disconnect()
+                    return result
+
+            # TOO OLD → do not open new position
+            if not allow_entry:
+                result.update({
+                    "ok": True,
+                    "action": "reversal_closed_but_entry_skipped_due_to_latency",
+                    "latency_seconds": sig_age
+                })
+                ib.disconnect()
+                return result
+            
+            if not sig.risk_valid:
+                result.update({
+                    "ok": True,
+                    "action": "reversal_closed_but_entry_skipped_no_risk_params",
+                    "reason": "missing_takeprofit_or_stoploss"
+                })
+                ib.disconnect()
+                return result
+            
+
+            # Fresh enough → open reversed position
+            time.sleep(max(1, int(settings.delay_sec)))
+
+            open_position_with_brackets(
+                ib, contract, desired_dir, desired_qty,
+                sig.take_profit, sig.stop_loss, sig.target_percentage
+            )
+
+            result.update({
+                "ok": True,
+                "action": "reversal_opened",
+                "opened_dir": desired_dir,
+                "opened_qty": desired_qty
+            })
+            ib.disconnect()
+            return result
+
+        # ----------------------------------------------------------
+        # FLAT → NEW ENTRY
+        # ----------------------------------------------------------
+        if qty == 0:
+            # Skip stale entries
+            if not allow_entry:
+                result.update({
+                    "ok": True,
+                    "action": "entry_skipped_due_to_latency",
+                    "latency_seconds": sig_age
+                })
+                ib.disconnect()
+                return result
+            
+            if desired_dir != 0 and not sig.risk_valid:
+                result.update({
+                    "ok": True,
+                    "action": "entry_ignored_no_risk_params",
+                    "reason": "missing_takeprofit_or_stoploss"
+                })
                 ib.disconnect()
                 return result
 
-            time.sleep(max(1, int(settings.delay_sec)))
-            open_position(ib, contract, desired_dir, desired_qty)
-            result.update({"ok": True, "action": "reversal_opened", "opened_dir": desired_dir, "opened_qty": desired_qty})
-            ib.disconnect()
-            return result
 
-        # flat -> open
-        if qty == 0:
+            # Fresh entry → open position
             time.sleep(max(0, int(settings.execution_delay)))
-            open_position(ib, contract, desired_dir, desired_qty)
-            result.update({"ok": True, "action": "opened", "opened_dir": desired_dir, "opened_qty": desired_qty})
+
+            open_position_with_brackets(
+                ib, contract, desired_dir, desired_qty,
+                sig.take_profit, sig.stop_loss, sig.target_percentage
+            )
+
+            result.update({
+                "ok": True,
+                "action": "opened",
+                "opened_dir": desired_dir,
+                "opened_qty": desired_qty
+            })
             ib.disconnect()
             return result
 
+        # ----------------------------------------------------------
+        # Should never reach here
+        # ----------------------------------------------------------
         result.update({"ok": False, "action": "ambiguous_state", "current_qty": qty})
         ib.disconnect()
         return result
@@ -718,6 +981,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
     except Exception as e:
         result.update({"ok": False, "error": str(e)})
         return result
+
 
 
 # ---------------------------
@@ -743,11 +1007,6 @@ def webhook() -> Any:
     except Exception:
         payload = {}
 
-    key = webhook_dedupe_key(payload)
-    if dedupe_cache.seen_recently(key):
-        logger.info(f"Deduped duplicate webhook (within {DEDUPE_TTL_SEC}s). payload={payload}")
-        return jsonify({"ok": True, "deduped": True}), 200
-
     try:
         settings = settings_cache.get()
         sig = parse_signal(payload)
@@ -761,9 +1020,6 @@ def webhook() -> Any:
 
         now_local = now_in_market_tz(settings)
 
-        # enforce preclose close / postopen reopen ONLY on webhook
-        ensure_preclose_close_if_needed(settings, accounts)
-        ensure_postopen_reopen_if_needed(settings, accounts)
 
         # market hours gating
         if not in_trading_window(now_local, settings):
@@ -796,6 +1052,46 @@ def webhook() -> Any:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
+def background_scheduler_loop():
+    """
+    Runs independently of Flask.
+    Only triggers preclose/postopen checks when the current time
+    is actually inside one of those windows.
+    """
+    logger.info("Background scheduler thread started.")
+
+    while True:
+        try:
+            settings = settings_cache.get()
+            now_local = now_in_market_tz(settings)
+
+            # Extract the windows
+            open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+
+            # PRE-CLOSE WINDOW
+            if preclose_dt <= now_local < close_dt:
+                accounts = secrets_cache.get_accounts()
+                if accounts:
+                    ensure_preclose_close_if_needed(settings, accounts)
+
+            # POST-OPEN WINDOW
+            elif reopen_dt <= now_local < close_dt:
+                accounts = secrets_cache.get_accounts()
+                if accounts:
+                    ensure_postopen_reopen_if_needed(settings, accounts)
+
+            # Otherwise: do NOTHING – sleep until next cycle
+
+        except Exception as e:
+            logger.exception(f"Scheduler error: {e}")
+
+        time.sleep(20)  # or 30, your choice
+
+
 if __name__ == "__main__":
+    # Start scheduler thread BEFORE Flask
+    t = threading.Thread(target=background_scheduler_loop, daemon=True)
+    t.start()
+
     logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}")
     app.run(host=BIND_HOST, port=BIND_PORT)
