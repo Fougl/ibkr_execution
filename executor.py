@@ -105,15 +105,27 @@ DEFAULT_SYMBOL_MAP = {
 }
 
 
-# ---------------------------
-# Logging
-# ---------------------------
+os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
 logger = logging.getLogger("executor")
 logger.setLevel(logging.INFO)
-os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-_handler = RotatingFileHandler(LOG_PATH, maxBytes=5_000_000, backupCount=5)
-_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-logger.addHandler(_handler)
+
+file_handler = logging.FileHandler(LOG_PATH, mode="a")
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+stream_handler = logging.StreamHandler()
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+# ---------------------------
+# # Logging
+# # ---------------------------
+# logger = logging.getLogger("executor")
+# logger.setLevel(logging.INFO)
+# os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+# _handler = RotatingFileHandler(LOG_PATH, maxBytes=5_000_000, backupCount=5)
+# _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+# logger.addHandler(_handler)
 
 
 # ---------------------------
