@@ -737,6 +737,7 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
         if qty == 0:
             return True
         logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
+        ib.sleep(0.1)
         time.sleep(1)
     return False
 
