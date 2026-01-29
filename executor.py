@@ -105,6 +105,16 @@ DEFAULT_SYMBOL_MAP = {
     "ES1!":  {"secType": "FUT", "exchange": "CME", "currency": "USD", "symbol": "ES",  "lastTradeDateOrContractMonth": "", "localSymbol": "ESH6"},
 }
 
+# Resolve AWS region ONCE at startup
+try:
+    _SESSION = boto3.Session()
+    REGION = _SESSION.region_name
+    if not REGION:
+        raise RuntimeError("Could not resolve AWS region at startup")
+except Exception as e:
+    print(f"FATAL: Could not detect AWS region: {e}")
+    raise
+
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
@@ -207,15 +217,17 @@ settings_cache = SettingsCache()
 
 def load_settings_from_ddb() -> Settings:
     try:
-        logger.info(f"[DDB] Loading settings table={DDB_TABLE} PK={DDB_PK} SK={DDB_SK}")
-        ddb = boto3.client("dynamodb", region_name=resolved_region())
+        #logger.info(f"[DDB] Loading settings table={DDB_TABLE} PK={DDB_PK} SK={DDB_SK}")
+        # ddb = boto3.client("dynamodb", region_name=resolved_region())
+        ddb = boto3.client("dynamodb", region_name=REGION)
+
         resp = ddb.get_item(
             TableName=DDB_TABLE,
             Key={"PK": {"S": DDB_PK}, "SK": {"S": DDB_SK}},
             ConsistentRead=True,
         )
         item = resp.get("Item", {})
-        logger.info(f"[DDB] Settings item_found={bool(item)}")
+        #logger.info(f"[DDB] Settings item_found={bool(item)}")
         if not item:
             logger.warning("DynamoDB settings not found; using defaults.")
             return Settings()
@@ -259,9 +271,15 @@ secrets_cache = SecretsCache()
 
 
 def list_ibkr_accounts() -> List[AccountSpec]:
-    region = resolved_region()
-    logger.info(f"[SECRETS] Listing accounts region={region} filter='{SECRETS_FILTER_SUBSTRING}'")
-    sm = boto3.client("secretsmanager", region_name=region)
+    # region = resolved_region()
+    # logger.info(f"[SECRETS] Listing accounts region={region} filter='{SECRETS_FILTER_SUBSTRING}'")
+    
+    # sm = boto3.client("secretsmanager", region_name=region)
+    
+    logger.info(f"[SECRETS] Listing accounts region={REGION} filter='{SECRETS_FILTER_SUBSTRING}'")
+
+    sm = boto3.client("secretsmanager", region_name=REGION)
+
 
     accounts: List[AccountSpec] = []
     paginator = sm.get_paginator("list_secrets")
@@ -1166,8 +1184,7 @@ def background_scheduler_loop():
             if last_postopen_run_day != market_day:
                 last_postopen_run_day = None
 
-            accounts = secrets_cache.get_accounts()
-            logger.info(f"[HTTP] Accounts found={len(accounts)}")
+
 
             # ==========================================
             # PRE-CLOSE WINDOW — run ONCE per market day
@@ -1175,6 +1192,8 @@ def background_scheduler_loop():
             if preclose_dt <= now_local:
                 if last_preclose_run_day != market_day:
                     logger.info("Triggering pre-close ensure for market day %s", market_day)
+                    accounts = secrets_cache.get_accounts()
+                    logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     if accounts:
                         ensure_preclose_close_if_needed(settings, accounts)
                     last_preclose_run_day = market_day
@@ -1185,6 +1204,8 @@ def background_scheduler_loop():
             if reopen_dt <= now_local:
                 if last_postopen_run_day != market_day:
                     logger.info("Triggering post-open ensure for market day %s", market_day)
+                    accounts = secrets_cache.get_accounts()
+                    logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     if accounts:
                         ensure_postopen_reopen_if_needed(settings, accounts)
                     last_postopen_run_day = market_day
