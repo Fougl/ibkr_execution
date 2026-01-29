@@ -1167,7 +1167,7 @@ def background_scheduler_loop():
 
         time.sleep(20)
 
-
+_scheduler_started = False
 def _start_scheduler_once():
     global _scheduler_started
     if not hasattr(__builtins__, "_scheduler_started"):
