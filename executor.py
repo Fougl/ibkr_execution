@@ -351,38 +351,38 @@ def market_datetimes(now_local: datetime, settings: Settings):
     open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
     close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
 
-    logger.info(f"[DEBUG/MH] Parsed market_open={settings.market_open}, market_close={settings.market_close}")
-    logger.info(f"[DEBUG/MH] Initial open_dt={open_dt}, close_dt={close_dt}")
+    #logger.info(f"[DEBUG/MH] Parsed market_open={settings.market_open}, market_close={settings.market_close}")
+    #logger.info(f"[DEBUG/MH] Initial open_dt={open_dt}, close_dt={close_dt}")
 
     # ============================================================
     # OVERNIGHT SESSION FIX (CORRECT, SINGLE BLOCK)
     # ============================================================
     if close_dt <= open_dt:
-        logger.info("[DEBUG/MH] Overnight session detected")
+        #logger.info("[DEBUG/MH] Overnight session detected")
 
         if now_local < open_dt:
             # After midnight but before today's open → session started yesterday
-            logger.info("[DEBUG/MH] now_local < open_dt → shifting open_dt to previous day")
+            #logger.info("[DEBUG/MH] now_local < open_dt → shifting open_dt to previous day")
             open_dt = open_dt - timedelta(days=1)
             # DO NOT shift close_dt here
         else:
             # After today's open → close_dt belongs to the next day
             close_dt_next = close_dt + timedelta(days=1)
-            logger.info(f"[DEBUG/MH] now_local >= open_dt → shifting close_dt to next day: {close_dt_next}")
+            #logger.info(f"[DEBUG/MH] now_local >= open_dt → shifting close_dt to next day: {close_dt_next}")
             close_dt = close_dt_next
-    else:
-        logger.info("[DEBUG/MH] Normal daytime session (no overnight shift).")
+    # else:
+    #     logger.info("[DEBUG/MH] Normal daytime session (no overnight shift).")
 
     preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
     reopen_dt   = open_dt + timedelta(minutes=settings.post_open_min)
 
     # FINAL LOGGING
-    logger.info(
-        f"[DEBUG/MH] FINAL window: open_dt={open_dt.isoformat()}  "
-        f"close_dt={close_dt.isoformat()} "
-        f"preclose_dt={preclose_dt.isoformat()} "
-        f"reopen_dt={reopen_dt.isoformat()}"
-    )
+    # logger.info(
+    #     f"[DEBUG/MH] FINAL window: open_dt={open_dt.isoformat()}  "
+    #     f"close_dt={close_dt.isoformat()} "
+    #     f"preclose_dt={preclose_dt.isoformat()} "
+    #     f"reopen_dt={reopen_dt.isoformat()}"
+    # )
 
     return open_dt, close_dt, preclose_dt, reopen_dt
 
