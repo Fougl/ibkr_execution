@@ -1002,7 +1002,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             # Retry logic
             if not wait_until_flat(ib, contract, settings):
                 logger.info("Exit close not reflected — retrying")
-                close_position(ib, contract, qty)
+                #close_position(ib, contract, qty)
                 time.sleep(1)
 
                 if not wait_until_flat(ib, contract, settings):
@@ -1040,14 +1040,18 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             # Retry close
             if not wait_until_flat(ib, contract, settings):
                 logger.info("Reversal close not reflected — retrying")
-                close_position(ib, contract, qty)
+                #close_position(ib, contract, qty)
                 time.sleep(1)
+                result.update({"ok": False, "action": "reversal_close_not_confirmed"})
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                ib.disconnect()
+                return result
 
-                if not wait_until_flat(ib, contract, settings):
-                    result.update({"ok": False, "action": "reversal_close_not_confirmed"})
-                    logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
-                    ib.disconnect()
-                    return result
+                # if not wait_until_flat(ib, contract, settings):
+                #     result.update({"ok": False, "action": "reversal_close_not_confirmed"})
+                #     logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #     ib.disconnect()
+                #     return result
 
             # TOO OLD → do not open new position
             if not allow_entry:
