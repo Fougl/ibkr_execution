@@ -1097,7 +1097,7 @@ def background_scheduler_loop():
             # ==========================================
             if reopen_dt <= now_local:
                 if last_postopen_run_day != market_day:
-                    #logger.info("Triggering post-open ensure for market day %s", market_day)
+                    logger.info("Triggering post-open ensure for market day %s", market_day)
                     if accounts:
                         ensure_postopen_reopen_if_needed(settings, accounts)
                     last_postopen_run_day = market_day
