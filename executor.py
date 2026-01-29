@@ -340,20 +340,43 @@ def now_in_market_tz(settings: Settings) -> datetime:
     return datetime.now(tz)
 
 
-def market_datetimes(now_local: datetime, settings: Settings) -> Tuple[datetime, datetime, datetime, datetime]:
+def market_datetimes(now_local: datetime, settings: Settings):
     tz = pytz.timezone(settings.timezone)
     d = now_local.date()
+
+    # Parse HH:MM strings
     oh, om = parse_hhmm(settings.market_open)
     ch, cm = parse_hhmm(settings.market_close)
-    open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om, 0))
-    
-    close_dt = tz.localize(datetime(d.year, d.month, d.month, ch, cm, 0))
-    if close_dt <= open_dt:
-        open_dt += timedelta(days=1)
 
+    # Localize both to TODAY first
+    open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
+    close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
+
+    # DEBUG: raw parsed times
+    logger.debug(f"[MH] Parsed open_str={settings.market_open}, close_str={settings.market_close}")
+    logger.debug(f"[MH] Initial open_dt={open_dt}, close_dt={close_dt}")
+
+    # FIX: overnight session handling
+    if close_dt <= open_dt:
+        logger.debug("[MH] Overnight session detected → shifting close_dt to next day")
+        close_dt = close_dt + timedelta(days=1)
+    else:
+        logger.debug("[MH] Normal session (no overnight shift)")
+
+    # Compute windows
     preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
     reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
+
+    # DEBUG: final intervals
+    logger.debug(
+        f"[MH] FINAL window: open_dt={open_dt.isoformat()} "
+        f"close_dt={close_dt.isoformat()} "
+        f"preclose_dt={preclose_dt.isoformat()} "
+        f"reopen_dt={reopen_dt.isoformat()}"
+    )
+
     return open_dt, close_dt, preclose_dt, reopen_dt
+
 
 
 def in_trading_window(now_local: datetime, settings: Settings) -> bool:
