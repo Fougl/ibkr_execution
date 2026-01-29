@@ -1168,6 +1168,7 @@ def background_scheduler_loop():
         time.sleep(20)
 
 
+logging.getLogger('werkzeug').disabled = True
 if __name__ == "__main__":
     # Start scheduler thread BEFORE Flask
     t = threading.Thread(target=background_scheduler_loop, daemon=True)
