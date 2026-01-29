@@ -108,16 +108,26 @@ DEFAULT_SYMBOL_MAP = {
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
+# logger = logging.getLogger("executor")
+# logger.setLevel(logging.INFO)
+
+# file_handler = logging.FileHandler(LOG_PATH, mode="a")
+# file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
+# stream_handler = logging.StreamHandler()
+
+# logger.addHandler(file_handler)
+# logger.addHandler(stream_handler)
+
 logger = logging.getLogger("executor")
 logger.setLevel(logging.INFO)
 
-file_handler = logging.FileHandler(LOG_PATH, mode="a")
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+handler = logging.FileHandler("/var/log/executor.log")
+formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
+handler.setFormatter(formatter)
 
-stream_handler = logging.StreamHandler()
-
-logger.addHandler(file_handler)
-logger.addHandler(stream_handler)
+logger.handlers = [handler]    # IMPORTANT: removes stdout handler
+logger.propagate = False
 # ---------------------------
 # # Logging
 # # ---------------------------
@@ -1048,7 +1058,7 @@ def background_scheduler_loop():
       - Runs ensure_postopen_reopen_if_needed() once per market day
       - Automatically detects new market day by comparing open_dt dates
     """
-    logger.info("Background scheduler thread started.")
+    #logger.info("Background scheduler thread started.")
 
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
