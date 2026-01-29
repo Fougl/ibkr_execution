@@ -1175,5 +1175,5 @@ if __name__ == "__main__":
     t = threading.Thread(target=background_scheduler_loop, daemon=True)
     t.start()
 
-    logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}", use_reloader=False)
-    app.run(host=BIND_HOST, port=BIND_PORT)
+    logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}")
+    app.run(host=BIND_HOST, port=BIND_PORT, use_reloader=False)
