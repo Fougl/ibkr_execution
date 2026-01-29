@@ -612,7 +612,17 @@ def open_position(ib: IB, contract: Contract, direction: int, qty: int) -> None:
         raise ValueError("direction must be +1 (long) or -1 (short)")
     action = "BUY" if direction > 0 else "SELL"
     order = MarketOrder(action, abs(int(qty)))
-    ib.placeOrder(contract, order)
+    trade = ib.placeOrder(contract, order)
+    
+    ib.waitOnUpdate(timeout=3)
+    
+    logger.info(
+        f"[FILL] acct={ib.clientId} {action} {qty} {contract.localSymbol} "
+        f"status={trade.orderStatus.status} "
+        f"filled={trade.orderStatus.filled} "
+        f"avgFillPrice={trade.orderStatus.avgFillPrice}"
+    )
+
 
 
 
