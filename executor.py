@@ -1157,7 +1157,7 @@ def background_scheduler_loop():
             # ==========================================
             if reopen_dt <= now_local:
                 if last_postopen_run_day != market_day:
-                    logger.info("Triggering post-open ensure for market day %s", market_day)
+                    #logger.info("Triggering post-open ensure for market day %s", market_day)
                     if accounts:
                         ensure_postopen_reopen_if_needed(settings, accounts)
                     last_postopen_run_day = market_day
@@ -1176,4 +1176,4 @@ if __name__ == "__main__":
     t.start()
 
     logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}")
-    app.run(host=BIND_HOST, port=BIND_PORT, use_reloader=False)
+    #app.run(host=BIND_HOST, port=BIND_PORT, use_reloader=False)
