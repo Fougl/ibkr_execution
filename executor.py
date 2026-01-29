@@ -1122,7 +1122,7 @@ def start_scheduler():
     logger.info("Background scheduler thread started.")
 
 # START scheduler on module import (works with Waitress)
-start_scheduler()
+
 
 # ---------------------------
 # Flask app
@@ -1197,3 +1197,4 @@ def webhook() -> Any:
 # When running executor.py directly (not via waitress)
 if __name__ == "__main__":
     logger.info("Executor initialized (direct run). Waitress not used here.")
+    start_scheduler()
