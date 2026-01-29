@@ -101,8 +101,8 @@ IB_CONNECT_TIMEOUT_SEC = float(os.getenv("IB_CONNECT_TIMEOUT_SEC", "3.0"))
 # Contract mapping
 SYMBOL_MAP_JSON = os.getenv("SYMBOL_MAP_JSON", "")
 DEFAULT_SYMBOL_MAP = {
-    "MES1!": {"secType": "FUT", "exchange": "CME", "currency": "USD", "symbol": "MES", "lastTradeDateOrContractMonth": ""},
-    "ES1!":  {"secType": "FUT", "exchange": "CME", "currency": "USD", "symbol": "ES",  "lastTradeDateOrContractMonth": ""},
+    "MES1!": {"secType": "FUT", "exchange": "CME", "currency": "USD", "symbol": "MES", "lastTradeDateOrContractMonth": "", "localSymbol": "MESH6"},
+    "ES1!":  {"secType": "FUT", "exchange": "CME", "currency": "USD", "symbol": "ES",  "lastTradeDateOrContractMonth": "", "localSymbol": "ESH6"},
 }
 
 
@@ -429,7 +429,7 @@ def build_contract(tv_symbol: str) -> Contract:
         raise ValueError(f"Unknown symbol mapping for '{tv_symbol}'. Configure SYMBOL_MAP_JSON or DEFAULT_SYMBOL_MAP.")
     info = m[tv_symbol]
     if info.get("secType") == "FUT":
-        symbol = info.get("symbol", "")
+        symbol = info.get("localSymbol", "")
         exchange = info.get("exchange", "CME")
         currency = info.get("currency", "USD")
         ltm = info.get("lastTradeDateOrContractMonth", "")
@@ -883,7 +883,27 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
 
         contract = build_contract(sig.symbol)
-        ib.qualifyContracts(contract)
+        # Qualify contract and detect ambiguity
+        qualified = ib.qualifyContracts(contract)
+        
+        # If 0 or more than 1 contract returned → ambiguous
+        if not qualified or len(qualified) != 1:
+            logger.warning(
+                f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                f"qualified_count={len(qualified)}"
+            )
+            ib.disconnect()
+            result.update({
+                "ok": True,
+                "action": "skipped_ambiguous_contract",
+                "reason": "ambiguous_contract",
+                "qualified_count": len(qualified)
+            })
+            return result
+        
+        # Use the resolved contract
+        contract = qualified[0]
+
 
         qty = current_position_qty(ib, contract)
         logger.info(f"acct={acc.account_number} BEFORE symbol={sig.symbol} "
