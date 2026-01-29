@@ -1069,15 +1069,15 @@ def background_scheduler_loop():
             now_local = now_in_market_tz(settings)
 
             open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
-            logger.info(
-                f"[SCHEDULER] now_local={now_local.isoformat()} | "
-                f"open_dt={open_dt.isoformat()} | "
-                f"close_dt={close_dt.isoformat()} | "
-                f"preclose_dt={preclose_dt.isoformat()} | "
-                f"reopen_dt={reopen_dt.isoformat()} | "
-                f"last_preclose_run_day={last_preclose_run_day} | "
-                f"last_postopen_run_day={last_postopen_run_day}"
-            )
+            # logger.info(
+            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
+            #     f"open_dt={open_dt.isoformat()} | "
+            #     f"close_dt={close_dt.isoformat()} | "
+            #     f"preclose_dt={preclose_dt.isoformat()} | "
+            #     f"reopen_dt={reopen_dt.isoformat()} | "
+            #     f"last_preclose_run_day={last_preclose_run_day} | "
+            #     f"last_postopen_run_day={last_postopen_run_day}"
+            # )
             # This defines the “trading day” — the day the market opens.
             market_day = open_dt.date()
 
