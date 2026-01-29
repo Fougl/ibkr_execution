@@ -119,7 +119,7 @@ except Exception as e:
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 logger = logging.getLogger()  # CLEAN: no redundant logger name prefix
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 handler = logging.FileHandler(LOG_PATH, mode="a")
 formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
@@ -737,7 +737,7 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
         if qty == 0:
             return True
         logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
-        time.sleep(max(1, int(settings.delay_sec)))
+        time.sleep(1)
     return False
 
 
