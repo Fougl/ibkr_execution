@@ -14,7 +14,7 @@ executor.py (multi-account, parallel)
   - executions happen IN PARALLEL across accounts (ThreadPoolExecutor)
 
 Expected webhook examples:
-  {"alert": "Exit Long", "symbol": "MES1!"}
+  {"alert": "Exit Long", "symbol": "MES1!"
   {"alert": "Exit Short", "symbol": "MES1!"}
 Optional:
   {"alert": "Enter Long", "symbol": "MES1!", "qty": 2}
@@ -108,7 +108,7 @@ DEFAULT_SYMBOL_MAP = {
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
-# logger = logging.getLogger()  # CLEAN: no redundant logger name prefix
+logger = logging.getLogger()  # CLEAN: no redundant logger name prefix
 logger.setLevel(logging.INFO)
 
 handler = logging.FileHandler(LOG_PATH, mode="a")
@@ -476,7 +476,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         raise ValueError("Missing 'alert' in payload")
 
     a = alert.lower()
-    logger.info(f"[SIG] Parsed alert='{alert}' symbol='{symbol}' qty={qty_i} takeProfit={take_profit} stopLoss={stop_loss} targetPct={target_pct} signalTimestamp={signal_ts} risk_valid={risk_ok}")
+    
 
     # NEW: read signal timestamp from JSON
     signal_ts = payload.get("signalTimestamp")
@@ -492,7 +492,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         qty_i = int(qty)
     except Exception:
         qty_i = DEFAULT_QTY
-
+    
     def _to_float(v: Any) -> float | None:
         if v is None:
             return None
@@ -598,7 +598,7 @@ def current_position_qty(ib: IB, contract: Contract) -> int:
 
 def close_position(ib: IB, contract: Contract, qty: int) -> None:
     if qty == 0:
-        logger.info(f"[EXEC] Branch=FLAT_ENTRY acct={acc.account_number} desired_dir={desired_dir} desired_qty={desired_qty}")
+        logger.info("[EXEC] Branch=FLAT_ENTRY")
         return
     action = "SELL" if qty > 0 else "BUY"
     order = MarketOrder(action, abs(int(qty)))
@@ -748,7 +748,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                 continue
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
-        logger.info(f"[EXEC] IB connected acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            logger.info(f"[EXEC] IB connected acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             pos = ib.positions()
 
             snapshot: Dict[str, Any] = {}
@@ -771,7 +771,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                 logger.info(f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
                 close_position(ib, p.contract, q)
 
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
             ib.disconnect()
 
@@ -818,7 +818,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
             any_open = any(int(p.position) != 0 for p in ib.positions())
             if any_open:
                 logger.info(f"Postopen: acct={acc.account_number} not flat; will not reopen.")
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
 
@@ -829,7 +829,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     st["preclose"][dayk][str(acc.account_number)]["reopen_at"] = now_local.isoformat()
                     save_state(st)
                 logger.info(f"Postopen: acct={acc.account_number} nothing to reopen (empty snapshot).")
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
 
@@ -848,7 +848,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 open_position(ib, c, direction, qty)
                 time.sleep(max(1, int(settings.execution_delay)))
 
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
             ib.disconnect()
 
@@ -930,7 +930,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                 f"qualified_count={len(qualified)}"
             )
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             result.update({
                 "ok": True,
@@ -970,10 +970,10 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # EXIT (ALWAYS perform exit, ignore latency)
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
-        logger.info(f"[EXEC] Branch=EXIT acct={acc.account_number} current_qty={qty}")
+            logger.info(f"[EXEC] Branch=EXIT acct={acc.account_number} current_qty={qty}")
             if qty == 0:
                 result.update({"ok": True, "action": "none_already_flat"})
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
 
@@ -989,12 +989,12 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
                 if not wait_until_flat(ib, contract, settings):
                     result.update({"ok": False, "action": "exit_failed_after_retry"})
-                    logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                    logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                     ib.disconnect()
                     return result
 
             result.update({"ok": True, "action": "exit_closed"})
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             return result
 
@@ -1005,9 +1005,9 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         desired_qty = sig.desired_qty if sig.desired_qty > 0 else DEFAULT_QTY
 
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
-        logger.info(f"[EXEC] Branch=NOOP_SAME_DIRECTION acct={acc.account_number} current_qty={qty} desired_dir={desired_dir}")
+            logger.info(f"[EXEC] Branch=NOOP_SAME_DIRECTION acct={acc.account_number} current_qty={qty} desired_dir={desired_dir}")
             result.update({"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             return result
 
@@ -1015,7 +1015,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # REVERSAL (close ALWAYS, but entry obeys latency)
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
-        logger.info(f"[EXEC] Branch=REVERSAL acct={acc.account_number} current_qty={qty} desired_dir={desired_dir}")
+            logger.info(f"[EXEC] Branch=REVERSAL acct={acc.account_number} current_qty={qty} desired_dir={desired_dir}")
             close_position(ib, contract, qty)
             time.sleep(1)
 
@@ -1027,7 +1027,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
                 if not wait_until_flat(ib, contract, settings):
                     result.update({"ok": False, "action": "reversal_close_not_confirmed"})
-                    logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                    logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                     ib.disconnect()
                     return result
 
@@ -1038,7 +1038,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                     "action": "reversal_closed_but_entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
             
@@ -1048,7 +1048,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                     "action": "reversal_closed_but_entry_skipped_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
             
@@ -1068,7 +1068,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             return result
 
@@ -1083,7 +1083,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                     "action": "entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
             
@@ -1093,7 +1093,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                     "action": "entry_ignored_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
 
@@ -1113,7 +1113,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             return result
 
@@ -1121,7 +1121,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # Should never reach here
         # ----------------------------------------------------------
         result.update({"ok": False, "action": "ambiguous_state", "current_qty": qty})
-        logger.info(f\"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}\")
+        logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
         ib.disconnect()
         return result
 
@@ -1167,7 +1167,7 @@ def background_scheduler_loop():
                 last_postopen_run_day = None
 
             accounts = secrets_cache.get_accounts()
-        logger.info(f"[HTTP] Accounts found={len(accounts)}")
+            logger.info(f"[HTTP] Accounts found={len(accounts)}")
 
             # ==========================================
             # PRE-CLOSE WINDOW — run ONCE per market day
@@ -1265,7 +1265,7 @@ def webhook() -> Any:
         results: List[Dict[str, Any]] = []
         max_workers = min(MAX_PARALLEL_ACCOUNTS, max(1, len(accounts)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        logger.info(f"[HTTP] Executing signal across accounts in parallel workers={max_workers}")
+            logger.info(f"[HTTP] Executing signal across accounts in parallel workers={max_workers}")
             futs = [pool.submit(execute_signal_for_account, acc, sig, settings) for acc in accounts]
             for f in as_completed(futs):
                 results.append(f.result())
