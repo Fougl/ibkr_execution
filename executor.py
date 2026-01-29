@@ -119,7 +119,7 @@ except Exception as e:
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 
 logger = logging.getLogger()  # CLEAN: no redundant logger name prefix
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 handler = logging.FileHandler(LOG_PATH, mode="a")
 formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
@@ -229,7 +229,7 @@ def load_settings_from_ddb() -> Settings:
         item = resp.get("Item", {})
         #logger.info(f"[DDB] Settings item_found={bool(item)}")
         if not item:
-            logger.warning("DynamoDB settings not found; using defaults.")
+            logger.info("DynamoDB settings not found; using defaults.")
             return Settings()
         return Settings.from_ddb(item)
     except Exception as e:
@@ -310,7 +310,7 @@ def list_ibkr_accounts() -> List[AccountSpec]:
 
                 accounts.append(AccountSpec(secret_name=name, account_number=acct, api_port=api_port, client_id=client_id))
             except Exception as e:
-                logger.warning(f"Failed parsing secret '{name}': {e}")
+                logger.info(f"Failed parsing secret '{name}': {e}")
 
     # deterministic order
     accounts.sort(key=lambda a: a.account_number)
@@ -431,7 +431,7 @@ def get_symbol_map() -> Dict[str, Dict[str, str]]:
         try:
             return json.loads(SYMBOL_MAP_JSON)
         except Exception:
-            logger.warning("Invalid SYMBOL_MAP_JSON; using default mapping.")
+            logger.info("Invalid SYMBOL_MAP_JSON; using default mapping.")
     return DEFAULT_SYMBOL_MAP
 
 
@@ -683,7 +683,7 @@ def open_position_with_brackets(
     if fill_price <= 0:
         logger.info("[ORDER] Entry fill price not available after waiting; will skip TP/SL")
         # If we couldn't get a fill price, fall back to original behavior (no brackets)
-        logger.warning("Entry filled price unavailable; skipping TP/SL placement.")
+        logger.info("Entry filled price unavailable; skipping TP/SL placement.")
         return
 
     # Derive TP offset if targetPercentage provided and takeProfit absent
@@ -944,7 +944,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
         # If 0 or more than 1 contract returned → ambiguous
         if not qualified or len(qualified) != 1:
-            logger.warning(
+            logger.info(
                 f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                 f"qualified_count={len(qualified)}"
             )
@@ -1001,7 +1001,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Retry logic
             if not wait_until_flat(ib, contract, settings):
-                logger.warning("Exit close not reflected — retrying")
+                logger.info("Exit close not reflected — retrying")
                 close_position(ib, contract, qty)
                 time.sleep(1)
 
@@ -1039,7 +1039,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Retry close
             if not wait_until_flat(ib, contract, settings):
-                logger.warning("Reversal close not reflected — retrying")
+                logger.info("Reversal close not reflected — retrying")
                 close_position(ib, contract, qty)
                 time.sleep(1)
 
@@ -1265,7 +1265,7 @@ def webhook() -> Any:
         # 1) list secrets
         accounts = secrets_cache.get_accounts()
         if not accounts:
-            logger.warning("No ibkr secrets found; refusing to trade.")
+            logger.info("No ibkr secrets found; refusing to trade.")
             return jsonify({"ok": False, "error": "no_ibkr_secrets_found"}), 503
 
         now_local = now_in_market_tz(settings)
