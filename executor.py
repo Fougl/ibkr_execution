@@ -1169,10 +1169,11 @@ def background_scheduler_loop():
 
 
 logging.getLogger('werkzeug').disabled = True
+logging.getLogger('flask.cli').disabled = True
 if __name__ == "__main__":
     # Start scheduler thread BEFORE Flask
     t = threading.Thread(target=background_scheduler_loop, daemon=True)
     t.start()
 
-    logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}")
+    logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}", use_reloader=False)
     app.run(host=BIND_HOST, port=BIND_PORT)
