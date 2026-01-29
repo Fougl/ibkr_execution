@@ -1168,12 +1168,17 @@ def background_scheduler_loop():
         time.sleep(20)
 
 
-logging.getLogger('werkzeug').disabled = True
-logging.getLogger('flask.cli').disabled = True
-if __name__ == "__main__":
-    # Start scheduler thread BEFORE Flask
-    t = threading.Thread(target=background_scheduler_loop, daemon=True)
-    t.start()
+def _start_scheduler_once():
+    global _scheduler_started
+    if not hasattr(__builtins__, "_scheduler_started"):
+        __builtins__._scheduler_started = True
+        t = threading.Thread(target=background_scheduler_loop, daemon=True)
+        t.start()
+        logger.info("Background scheduler thread started.")
 
-    logger.info(f"Starting executor Flask on {BIND_HOST}:{BIND_PORT} log={LOG_PATH}")
-    #app.run(host=BIND_HOST, port=BIND_PORT, use_reloader=False)
+_start_scheduler_once()
+# --------------------------------------------------------------------
+
+# When running executor.py directly (not via waitress)
+if __name__ == "__main__":
+    logger.info("Executor initialized (direct run). Waitress not used here.")
