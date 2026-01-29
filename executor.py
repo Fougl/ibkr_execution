@@ -59,6 +59,7 @@ import boto3
 import pytz
 from flask import Flask, jsonify, request
 from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
+import asyncio
 
 
 # ---------------------------
@@ -860,6 +861,13 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         "api_port": acc.api_port,
         "client_id": acc.client_id,
     }
+    
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop in this thread → create a dummy one so ib_insync won't try async
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     try:
         ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
