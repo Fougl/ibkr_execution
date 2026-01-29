@@ -864,7 +864,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 qty = abs(int(meta.get("position", 0)))
                 logger.info(f"Postopen: acct={acc.account_number} reopening {c.symbol} dir={'LONG' if direction>0 else 'SHORT'} qty={qty}")
                 open_position(ib, c, direction, qty)
-                time.sleep(max(1, int(settings.execution_delay)))
+                time.sleep(1)
 
             logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
@@ -1117,7 +1117,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
 
             # Fresh entry → open position
-            time.sleep(max(0, int(settings.execution_delay)))
+            #time.sleep(max(0, int(settings.execution_delay)))
 
             open_position_with_brackets(
                 ib, contract, desired_dir, desired_qty,
