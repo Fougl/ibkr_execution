@@ -432,8 +432,8 @@ def build_contract(tv_symbol: str) -> Contract:
         symbol = info.get("symbol", "")
         exchange = info.get("exchange", "CME")
         currency = info.get("currency", "USD")
-        local_symbol = info.get("currency", "USD")
-        ltm = info.get("localSymbol", "")
+        local_symbol = info.get("local_symbol", "USD")
+        ltm = info.get("lastTradeDateOrContractMonth", "")
         return Future(symbol=symbol, lastTradeDateOrContractMonth=ltm, exchange=exchange, currency=currency, localSymbol=local_symbol)
     raise ValueError(f"Unsupported secType for {tv_symbol}: {info.get('secType')}")
 
