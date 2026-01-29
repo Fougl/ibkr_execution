@@ -122,7 +122,7 @@ os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 logger = logging.getLogger("executor")
 logger.setLevel(logging.INFO)
 
-handler = logging.FileHandler("/var/log/executor.log")
+handler = logging.FileHandler(LOG_PATH, mode="a")
 formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s')
 handler.setFormatter(formatter)
 
