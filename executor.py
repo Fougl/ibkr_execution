@@ -591,7 +591,21 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
 # ---------------------------
 # IB helpers (per-account IB instance; no shared global IB)
 # ---------------------------
+# def ib_connect(host: str, port: int, client_id: int) -> IB:
+#     logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
+#     ib = IB()
+#     ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
+#     logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
+#     return ib
+
 def ib_connect(host: str, port: int, client_id: int) -> IB:
+    # Force each thread to have its own event loop
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
     ib = IB()
     ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
