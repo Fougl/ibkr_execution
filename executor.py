@@ -427,14 +427,31 @@ def build_contract(tv_symbol: str) -> Contract:
     m = get_symbol_map()
     if tv_symbol not in m:
         raise ValueError(f"Unknown symbol mapping for '{tv_symbol}'. Configure SYMBOL_MAP_JSON or DEFAULT_SYMBOL_MAP.")
+
     info = m[tv_symbol]
+
     if info.get("secType") == "FUT":
         symbol = info.get("symbol", "")
         exchange = info.get("exchange", "CME")
         currency = info.get("currency", "USD")
-        local_symbol = info.get("local_symbol", "USD")
+
+        # FIXED: local_symbol should come from localSymbol, NOT currency
+        local_symbol = info.get("localSymbol", "")
         ltm = info.get("lastTradeDateOrContractMonth", "")
-        return Future(symbol=symbol, lastTradeDateOrContractMonth=ltm, exchange=exchange, currency=currency, localSymbol=local_symbol)
+
+        logger.info(
+            f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
+            f"| currency={currency} | local_symbol={local_symbol}"
+        )
+
+        return Future(
+            symbol=symbol,
+            lastTradeDateOrContractMonth=ltm,
+            exchange=exchange,
+            currency=currency,
+            localSymbol=local_symbol,
+        )
+
     raise ValueError(f"Unsupported secType for {tv_symbol}: {info.get('secType')}")
 
 
