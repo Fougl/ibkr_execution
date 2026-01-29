@@ -344,38 +344,49 @@ def market_datetimes(now_local: datetime, settings: Settings):
     tz = pytz.timezone(settings.timezone)
     d = now_local.date()
 
-    # Parse HH:MM strings
+    # Parse HH:MM
     oh, om = parse_hhmm(settings.market_open)
     ch, cm = parse_hhmm(settings.market_close)
 
-    # Localize both to TODAY first
     open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
     close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
 
-    # DEBUG: raw parsed times
-    logger.debug(f"[MH] Parsed open_str={settings.market_open}, close_str={settings.market_close}")
-    logger.debug(f"[MH] Initial open_dt={open_dt}, close_dt={close_dt}")
+    logger.info(f"[DEBUG/MH] Parsed market_open={settings.market_open}, market_close={settings.market_close}")
+    logger.info(f"[DEBUG/MH] Initial open_dt={open_dt}, close_dt={close_dt}")
 
-    # FIX: overnight session handling
+    # ============================================================
+    # OVERNIGHT SESSION FIX (CORRECT, SINGLE BLOCK)
+    # ============================================================
     if close_dt <= open_dt:
-        logger.debug("[MH] Overnight session detected → shifting close_dt to next day")
-        close_dt = close_dt + timedelta(days=1)
+        logger.info("[DEBUG/MH] Overnight session detected")
+
+        if now_local < open_dt:
+            # After midnight but before today's open → session started yesterday
+            logger.info("[DEBUG/MH] now_local < open_dt → shifting open_dt to previous day")
+            open_dt = open_dt - timedelta(days=1)
+            # DO NOT shift close_dt here
+        else:
+            # After today's open → close_dt belongs to the next day
+            close_dt_next = close_dt + timedelta(days=1)
+            logger.info(f"[DEBUG/MH] now_local >= open_dt → shifting close_dt to next day: {close_dt_next}")
+            close_dt = close_dt_next
     else:
-        logger.debug("[MH] Normal session (no overnight shift)")
+        logger.info("[DEBUG/MH] Normal daytime session (no overnight shift).")
 
-    # Compute windows
     preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
-    reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
+    reopen_dt   = open_dt + timedelta(minutes=settings.post_open_min)
 
-    # DEBUG: final intervals
-    logger.debug(
-        f"[MH] FINAL window: open_dt={open_dt.isoformat()} "
+    # FINAL LOGGING
+    logger.info(
+        f"[DEBUG/MH] FINAL window: open_dt={open_dt.isoformat()}  "
         f"close_dt={close_dt.isoformat()} "
         f"preclose_dt={preclose_dt.isoformat()} "
         f"reopen_dt={reopen_dt.isoformat()}"
     )
 
     return open_dt, close_dt, preclose_dt, reopen_dt
+
+
 
 
 
@@ -1094,38 +1105,59 @@ def webhook() -> Any:
 
 def background_scheduler_loop():
     """
-    Runs independently of Flask.
-    Only triggers preclose/postopen checks when the current time
-    is actually inside one of those windows.
+    Market-aware scheduler:
+      - Runs ensure_preclose_close_if_needed() once per market day
+      - Runs ensure_postopen_reopen_if_needed() once per market day
+      - Automatically detects new market day by comparing open_dt dates
     """
     logger.info("Background scheduler thread started.")
+
+    last_preclose_run_day = None   # date of market_open for the last run
+    last_postopen_run_day = None   # date of market_open for the last run
 
     while True:
         try:
             settings = settings_cache.get()
             now_local = now_in_market_tz(settings)
 
-            # Extract the windows
             open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
 
-            # PRE-CLOSE WINDOW
-            if preclose_dt <= now_local < close_dt:
-                accounts = secrets_cache.get_accounts()
-                if accounts:
-                    ensure_preclose_close_if_needed(settings, accounts)
+            # This defines the “trading day” — the day the market opens.
+            market_day = open_dt.date()
 
-            # POST-OPEN WINDOW
-            elif reopen_dt <= now_local < close_dt:
-                accounts = secrets_cache.get_accounts()
-                if accounts:
-                    ensure_postopen_reopen_if_needed(settings, accounts)
+            # 🚨 RESET LOGIC
+            # If the market_day changed since last loop iteration => new trading day
+            if last_preclose_run_day != market_day:
+                last_preclose_run_day = None
+            if last_postopen_run_day != market_day:
+                last_postopen_run_day = None
 
-            # Otherwise: do NOTHING – sleep until next cycle
+            accounts = secrets_cache.get_accounts()
+
+            # ==========================================
+            # PRE-CLOSE WINDOW — run ONCE per market day
+            # ==========================================
+            if preclose_dt <= now_local:
+                if last_preclose_run_day != market_day:
+                    logger.info("Triggering pre-close ensure for market day %s", market_day)
+                    if accounts:
+                        ensure_preclose_close_if_needed(settings, accounts)
+                    last_preclose_run_day = market_day
+
+            # ==========================================
+            # POST-OPEN WINDOW — run ONCE per market day
+            # ==========================================
+            if reopen_dt <= now_local:
+                if last_postopen_run_day != market_day:
+                    logger.info("Triggering post-open ensure for market day %s", market_day)
+                    if accounts:
+                        ensure_postopen_reopen_if_needed(settings, accounts)
+                    last_postopen_run_day = market_day
 
         except Exception as e:
             logger.exception(f"Scheduler error: {e}")
 
-        time.sleep(20)  # or 30, your choice
+        time.sleep(20)
 
 
 if __name__ == "__main__":
