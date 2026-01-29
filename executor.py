@@ -1041,7 +1041,78 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         result.update({"ok": False, "error": str(e)})
         return result
 
+def background_scheduler_loop():
+    """
+    Market-aware scheduler:
+      - Runs ensure_preclose_close_if_needed() once per market day
+      - Runs ensure_postopen_reopen_if_needed() once per market day
+      - Automatically detects new market day by comparing open_dt dates
+    """
+    logger.info("Background scheduler thread started.")
 
+    last_preclose_run_day = None   # date of market_open for the last run
+    last_postopen_run_day = None   # date of market_open for the last run
+
+    while True:
+        try:
+            settings = settings_cache.get()
+            now_local = now_in_market_tz(settings)
+
+            open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+
+            # This defines the “trading day” — the day the market opens.
+            market_day = open_dt.date()
+
+            # 🚨 RESET LOGIC
+            # If the market_day changed since last loop iteration => new trading day
+            if last_preclose_run_day != market_day:
+                last_preclose_run_day = None
+            if last_postopen_run_day != market_day:
+                last_postopen_run_day = None
+
+            accounts = secrets_cache.get_accounts()
+
+            # ==========================================
+            # PRE-CLOSE WINDOW — run ONCE per market day
+            # ==========================================
+            if preclose_dt <= now_local:
+                if last_preclose_run_day != market_day:
+                    logger.info("Triggering pre-close ensure for market day %s", market_day)
+                    if accounts:
+                        ensure_preclose_close_if_needed(settings, accounts)
+                    last_preclose_run_day = market_day
+
+            # ==========================================
+            # POST-OPEN WINDOW — run ONCE per market day
+            # ==========================================
+            if reopen_dt <= now_local:
+                if last_postopen_run_day != market_day:
+                    #logger.info("Triggering post-open ensure for market day %s", market_day)
+                    if accounts:
+                        ensure_postopen_reopen_if_needed(settings, accounts)
+                    last_postopen_run_day = market_day
+
+        except Exception as e:
+            logger.exception(f"Scheduler error: {e}")
+
+        time.sleep(20)
+        
+_scheduler_started_flag = False
+
+def start_scheduler():
+    global _scheduler_started_flag
+
+    if _scheduler_started_flag:
+        return
+
+    _scheduler_started_flag = True
+
+    t = threading.Thread(target=background_scheduler_loop, daemon=True)
+    t.start()
+    logger.info("Background scheduler thread started.")
+
+# START scheduler on module import (works with Waitress)
+start_scheduler()
 
 # ---------------------------
 # Flask app
@@ -1111,72 +1182,6 @@ def webhook() -> Any:
         return jsonify({"ok": False, "error": str(e)}), 400
 
 
-def background_scheduler_loop():
-    """
-    Market-aware scheduler:
-      - Runs ensure_preclose_close_if_needed() once per market day
-      - Runs ensure_postopen_reopen_if_needed() once per market day
-      - Automatically detects new market day by comparing open_dt dates
-    """
-    logger.info("Background scheduler thread started.")
-
-    last_preclose_run_day = None   # date of market_open for the last run
-    last_postopen_run_day = None   # date of market_open for the last run
-
-    while True:
-        try:
-            settings = settings_cache.get()
-            now_local = now_in_market_tz(settings)
-
-            open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
-
-            # This defines the “trading day” — the day the market opens.
-            market_day = open_dt.date()
-
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            if last_preclose_run_day != market_day:
-                last_preclose_run_day = None
-            if last_postopen_run_day != market_day:
-                last_postopen_run_day = None
-
-            accounts = secrets_cache.get_accounts()
-
-            # ==========================================
-            # PRE-CLOSE WINDOW — run ONCE per market day
-            # ==========================================
-            if preclose_dt <= now_local:
-                if last_preclose_run_day != market_day:
-                    logger.info("Triggering pre-close ensure for market day %s", market_day)
-                    if accounts:
-                        ensure_preclose_close_if_needed(settings, accounts)
-                    last_preclose_run_day = market_day
-
-            # ==========================================
-            # POST-OPEN WINDOW — run ONCE per market day
-            # ==========================================
-            if reopen_dt <= now_local:
-                if last_postopen_run_day != market_day:
-                    #logger.info("Triggering post-open ensure for market day %s", market_day)
-                    if accounts:
-                        ensure_postopen_reopen_if_needed(settings, accounts)
-                    last_postopen_run_day = market_day
-
-        except Exception as e:
-            logger.exception(f"Scheduler error: {e}")
-
-        time.sleep(20)
-
-_scheduler_started = False
-def _start_scheduler_once():
-    global _scheduler_started
-    if not hasattr(__builtins__, "_scheduler_started"):
-        __builtins__._scheduler_started = True
-        t = threading.Thread(target=background_scheduler_loop, daemon=True)
-        t.start()
-        logger.info("Background scheduler thread started.")
-
-_start_scheduler_once()
 # --------------------------------------------------------------------
 
 # When running executor.py directly (not via waitress)
