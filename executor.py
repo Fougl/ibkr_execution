@@ -609,6 +609,10 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
     ib = IB()
     ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
+    ib.execDetailsEvent.clear()
+    ib.commissionReportEvent.clear()
+    ib.orderStatusEvent.clear()
+    ib.openOrderEvent.clear()
     logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
     return ib
 
