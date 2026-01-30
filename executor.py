@@ -58,10 +58,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import pytz
 from flask import Flask, jsonify, request
-from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, util  # type: ignore
+from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
 import asyncio
 
-util.noLog()
+
 # ---------------------------
 # Config (ENV)
 # ---------------------------
@@ -117,7 +117,8 @@ except Exception as e:
 
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-
+logging.getLogger("ib_insync").setLevel(logging.ERROR)
+logging.getLogger("ibapi").setLevel(logging.ERROR)
 logger = logging.getLogger()  # CLEAN: no redundant logger name prefix
 logger.setLevel(logging.INFO)
 
