@@ -58,10 +58,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import pytz
 from flask import Flask, jsonify, request
-from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
+from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, util  # type: ignore
 import asyncio
 
-
+util.noLog()
 # ---------------------------
 # Config (ENV)
 # ---------------------------
@@ -127,24 +127,6 @@ handler.setFormatter(formatter)
 
 logger.handlers = [handler]    # IMPORTANT: removes stdout handler
 logger.propagate = False
-
-
-# ------------------------------------------------------------
-# FILTER TO REMOVE IB_INSYNC NOISE (SAFE — DOES NOT BREAK LOGIC)
-# ------------------------------------------------------------
-class IBFilter(logging.Filter):
-    def filter(self, record):
-        msg = record.getMessage()
-        # suppress unwanted spam
-        if "execDetails" in msg: return False
-        if "commissionReport" in msg: return False
-        if "position:" in msg: return False
-        if "orderStatus" in msg and "Filled" not in msg: return False  # keep fills only
-        if "openOrder" in msg: return False
-        return True
-
-logger.addFilter(IBFilter())
-
 # ---------------------------
 # # Logging
 # # ---------------------------
