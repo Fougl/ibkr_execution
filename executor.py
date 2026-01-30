@@ -59,13 +59,35 @@ import boto3
 import pytz
 from flask import Flask, jsonify, request
 from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
-from ib_insync.event import Event
 import asyncio
 
-event.Event.__call__ = lambda *a, **k: None
-event.Event.emit = lambda *a, **k: None
-event.Event.connect = lambda *a, **k: None
-event.Event.disconnect = lambda *a, **k: None
+import ib_insync
+
+def _noop(*args, **kwargs):
+    return None
+
+# Patch the Wrapper methods that IBApi calls
+try:
+    W = ib_insync.wrapper.Wrapper
+    for name in dir(W):
+        if not name.startswith("_"):
+            fn = getattr(W, name)
+            if callable(fn):
+                setattr(W, name, _noop)
+except Exception:
+    pass
+
+# Patch internal events dispatch
+try:
+    ib_insync.IB._events = {}
+except Exception:
+    pass
+
+# Disable errorEvent
+try:
+    ib_insync.IB.errorEvent = _noop
+except Exception:
+    pass
 
 
 # ---------------------------
