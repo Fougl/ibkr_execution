@@ -58,8 +58,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import pytz
 from flask import Flask, jsonify, request
-from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
+from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, event  # type: ignore
 import asyncio
+
+event.Event.__call__ = lambda *a, **k: None
+event.Event.emit = lambda *a, **k: None
+event.Event.connect = lambda *a, **k: None
+event.Event.disconnect = lambda *a, **k: None
 
 
 # ---------------------------
@@ -609,10 +614,10 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
     ib = IB()
     ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
-    ib.execDetailsEvent.clear()
-    ib.commissionReportEvent.clear()
-    ib.orderStatusEvent.clear()
-    ib.openOrderEvent.clear()
+    # ib.execDetailsEvent.clear()
+    # ib.commissionReportEvent.clear()
+    # ib.orderStatusEvent.clear()
+    # ib.openOrderEvent.clear()
     logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
     return ib
 
