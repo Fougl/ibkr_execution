@@ -63,34 +63,52 @@ import asyncio
 
 import ib_insync
 
-def silent_wrapper(fn):
-    def silent(*args, **kwargs):
-        # Call underlying logic but discard print/log
-        try:
-            return fn(*args, **kwargs)
-        except Exception:
-            return None
-    return silent
-
-NOISY_METHODS = [
-    "updateAccountValue",
-    "updatePortfolio",
-    "updateAccountTime",
-    "position",
-    "commissionReport",
-    "execDetails",
-    "pnl",
-]
-
-try:
+def silence_all_callbacks():
     W = ib_insync.wrapper.Wrapper
-    for name in NOISY_METHODS:
-        if hasattr(W, name):
-            original = getattr(W, name)
-            if callable(original):
-                setattr(W, name, silent_wrapper(original))
-except Exception as e:
-    print("Wrapper partial patch failed:", e)
+
+    SAFE_TO_SILENCE = [
+        # Every noisy callback
+        'updateAccountValue',
+        'updatePortfolio',
+        'updateAccountTime',
+        'position',
+        'positionEnd',
+        'commissionReport',
+        'execDetails',
+        'execDetailsEnd',
+        'pnlSingle',
+        'pnl',
+        'tickOptionComputation',
+        'tickGeneric',
+        'tickString',
+        'tickEFP',
+        'historicalData',
+        'historicalDataEnd',
+    ]
+
+    ESSENTIAL = {
+        # DO NOT silence these (breaks fills)
+        'nextValidId',
+        'orderStatus',
+        'openOrder',
+        'openOrderEnd',
+        'contractDetails',
+        'contractDetailsEnd',
+    }
+
+    for name in dir(W):
+        if name.startswith('_'):
+            continue
+        if name in ESSENTIAL:
+            continue
+        if name in SAFE_TO_SILENCE:
+            try:
+                setattr(W, name, lambda *a, **k: None)
+            except:
+                pass
+
+silence_all_callbacks()
+    
 
 
 # ---------------------------
