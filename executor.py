@@ -61,55 +61,6 @@ from flask import Flask, jsonify, request
 from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
 import asyncio
 
-import ib_insync
-
-def silence_all_callbacks():
-    W = ib_insync.wrapper.Wrapper
-
-    SAFE_TO_SILENCE = [
-        # Every noisy callback
-        'updateAccountValue',
-        'updatePortfolio',
-        'updateAccountTime',
-        'position',
-        'positionEnd',
-        'commissionReport',
-        'execDetails',
-        'execDetailsEnd',
-        'pnlSingle',
-        'pnl',
-        'tickOptionComputation',
-        'tickGeneric',
-        'tickString',
-        'tickEFP',
-        'historicalData',
-        'historicalDataEnd',
-    ]
-
-    ESSENTIAL = {
-        # DO NOT silence these (breaks fills)
-        'nextValidId',
-        'orderStatus',
-        'openOrder',
-        'openOrderEnd',
-        'contractDetails',
-        'contractDetailsEnd',
-    }
-
-    for name in dir(W):
-        if name.startswith('_'):
-            continue
-        if name in ESSENTIAL:
-            continue
-        if name in SAFE_TO_SILENCE:
-            try:
-                setattr(W, name, lambda *a, **k: None)
-            except:
-                pass
-
-silence_all_callbacks()
-    
-
 
 # ---------------------------
 # Config (ENV)
@@ -176,6 +127,24 @@ handler.setFormatter(formatter)
 
 logger.handlers = [handler]    # IMPORTANT: removes stdout handler
 logger.propagate = False
+
+
+# ------------------------------------------------------------
+# FILTER TO REMOVE IB_INSYNC NOISE (SAFE — DOES NOT BREAK LOGIC)
+# ------------------------------------------------------------
+class IBFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        # suppress unwanted spam
+        if "execDetails" in msg: return False
+        if "commissionReport" in msg: return False
+        if "position:" in msg: return False
+        if "orderStatus" in msg and "Filled" not in msg: return False  # keep fills only
+        if "openOrder" in msg: return False
+        return True
+
+logger.addFilter(IBFilter())
+
 # ---------------------------
 # # Logging
 # # ---------------------------
@@ -658,10 +627,10 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
     ib = IB()
     ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
-    # ib.execDetailsEvent.clear()
-    # ib.commissionReportEvent.clear()
-    # ib.orderStatusEvent.clear()
-    # ib.openOrderEvent.clear()
+    ib.execDetailsEvent.clear()
+    ib.commissionReportEvent.clear()
+    ib.orderStatusEvent.clear()
+    ib.openOrderEvent.clear()
     logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
     return ib
 
