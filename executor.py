@@ -58,7 +58,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import pytz
 from flask import Flask, jsonify, request
-from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, event  # type: ignore
+from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
+from ib_insync.event import Event
 import asyncio
 
 event.Event.__call__ = lambda *a, **k: None
