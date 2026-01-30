@@ -63,31 +63,34 @@ import asyncio
 
 import ib_insync
 
-def _noop(*args, **kwargs):
-    return None
+def silent_wrapper(fn):
+    def silent(*args, **kwargs):
+        # Call underlying logic but discard print/log
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            return None
+    return silent
 
-# Patch the Wrapper methods that IBApi calls
+NOISY_METHODS = [
+    "updateAccountValue",
+    "updatePortfolio",
+    "updateAccountTime",
+    "position",
+    "commissionReport",
+    "execDetails",
+    "pnl",
+]
+
 try:
     W = ib_insync.wrapper.Wrapper
-    for name in dir(W):
-        if not name.startswith("_"):
-            fn = getattr(W, name)
-            if callable(fn):
-                setattr(W, name, _noop)
-except Exception:
-    pass
-
-# Patch internal events dispatch
-try:
-    ib_insync.IB._events = {}
-except Exception:
-    pass
-
-# Disable errorEvent
-try:
-    ib_insync.IB.errorEvent = _noop
-except Exception:
-    pass
+    for name in NOISY_METHODS:
+        if hasattr(W, name):
+            original = getattr(W, name)
+            if callable(original):
+                setattr(W, name, silent_wrapper(original))
+except Exception as e:
+    print("Wrapper partial patch failed:", e)
 
 
 # ---------------------------
