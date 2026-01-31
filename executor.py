@@ -617,6 +617,37 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
     return ib
 
+def cancel_all_open_orders(ib: IB, reason: str) -> int:
+    """
+    Cancels ALL open orders currently known to this IB client (for this account).
+    Returns number of cancel attempts.
+    """
+    attempts = 0
+
+    try:
+        # Pull latest open orders from TWS/IBG
+        ib.reqOpenOrders()
+        ib.waitOnUpdate(timeout=2)
+    except Exception:
+        pass
+
+    try:
+        orders = list(ib.openOrders())
+    except Exception:
+        orders = []
+
+    for o in orders:
+        try:
+            ib.cancelOrder(o)
+            attempts += 1
+            ib.sleep(0.2)
+            logger.info(f"[ORDERS] Canceled open order reason={reason} orderId={getattr(o,'orderId',None)}")
+        except Exception as e:
+            logger.info(f"[ORDERS] Cancel failed reason={reason} orderId={getattr(o,'orderId',None)} err={e}")
+
+    return attempts
+
+
 
 def current_position_qty(ib: IB, contract: Contract) -> int:
     qty = 0
@@ -788,6 +819,43 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
             logger.info(f"[EXEC] IB connected acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             pos = ib.positions()
+            
+            # Snapshot + cancel open orders (TP/SL etc.)
+            try:
+                ib.reqOpenOrders()
+                ib.waitOnUpdate(timeout=2)
+            except Exception:
+                pass
+            
+            open_orders = list(ib.openOrders())
+            
+            orders_snapshot: List[Dict[str, Any]] = []
+            for o in open_orders:
+                try:
+                    orders_snapshot.append({
+                        "orderId": getattr(o, "orderId", None),
+                        "action": getattr(o, "action", None),
+                        "totalQuantity": getattr(o, "totalQuantity", None),
+                        "orderType": getattr(o, "orderType", None),
+                        "lmtPrice": getattr(o, "lmtPrice", None),
+                        "auxPrice": getattr(o, "auxPrice", None),
+                        "tif": getattr(o, "tif", None),
+                    
+                        # NEW — contract identity so we can rebuild order:
+                        "conId": getattr(o.contract, "conId", None),
+                        "symbol": getattr(o.contract, "symbol", None),
+                        "secType": getattr(o.contract, "secType", None),
+                        "exchange": getattr(o.contract, "exchange", None),
+                        "localSymbol": getattr(o.contract, "localSymbol", None),
+                        "ltm": getattr(o.contract, "lastTradeDateOrContractMonth", None),
+                    })
+
+                except Exception:
+                    continue
+            
+            cancel_all_open_orders(ib, reason="preclose")
+
+            
 
             snapshot: Dict[str, Any] = {}
             for p in pos:
@@ -821,6 +889,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     "done": True,
                     "at": now_local.isoformat(),
                     "snapshot": snapshot,
+                    "orders_snapshot": orders_snapshot,
                     "reopen_done": False,
                     "reopen_at": None,
                 }
@@ -849,6 +918,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 continue
 
             snapshot: Dict[str, Any] = entry.get("snapshot", {}) or {}
+            orders_snapshot: List[Dict[str, Any]] = entry.get("orders_snapshot", []) or []
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
 
@@ -885,6 +955,53 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 logger.info(f"Postopen: acct={acc.account_number} reopening {c.symbol} dir={'LONG' if direction>0 else 'SHORT'} qty={qty}")
                 open_position(ib, c, direction, qty)
                 time.sleep(1)
+
+            # ========== RESTORE PRE-CLOSE BRACKET ORDERS ==========
+            for om in orders_snapshot:
+                try:
+                    conId = om.get("conId")
+                    if not conId:
+                        continue
+            
+                    qty = int(float(om.get("totalQuantity") or 0))
+                    if qty <= 0:
+                        continue
+            
+                    action = (om.get("action") or "").upper()
+                    lmt = om.get("lmtPrice")
+                    aux = om.get("auxPrice")
+            
+                    # Rebuild contract
+                    c = Future(
+                        symbol=om.get("symbol", ""),
+                        lastTradeDateOrContractMonth=om.get("ltm", ""),
+                        exchange=om.get("exchange", ""),
+                        currency="USD",
+                        localSymbol=om.get("localSymbol", ""),
+                    )
+            
+                    # Determine buy/sell direction for TP/SL
+                    if action == "SELL":
+                        exit_action = "SELL"
+                    else:
+                        exit_action = "BUY"
+            
+                    if om.get("orderType") == "LMT" and lmt is not None:
+                        tp = LimitOrder(exit_action, qty, float(lmt))
+                        ib.placeOrder(c, tp)
+                        ib.sleep(1)
+                        logger.info(f"[POSTOPEN] Recreated TP order {tp.orderId} price={lmt}")
+            
+                    if om.get("orderType") == "STP" and aux is not None:
+                        sl = StopOrder(exit_action, qty, float(aux))
+                        ib.placeOrder(c, sl)
+                        ib.sleep(1)
+                        logger.info(f"[POSTOPEN] Recreated SL order {sl.orderId} price={aux}")
+            
+                except Exception as e:
+                    logger.info(f"[POSTOPEN] Failed restoring order err={e}")
+
+
 
             logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
@@ -1094,7 +1211,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 ib.disconnect()
                 return result
             
-
+            cancel_all_open_orders(ib, reason="before_reversal_entry")
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
@@ -1142,7 +1259,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-
+            cancel_all_open_orders(ib, reason="before_new_entry")
             open_position_with_brackets(
                 ib, contract, desired_dir, desired_qty,
                 sig.take_profit, sig.stop_loss, sig.target_percentage
