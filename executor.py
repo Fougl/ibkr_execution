@@ -116,6 +116,8 @@ except Exception as e:
     raise
 
 
+
+
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 logging.getLogger("ib_insync").setLevel(logging.ERROR)
 logging.getLogger("ibapi").setLevel(logging.ERROR)
@@ -141,6 +143,35 @@ logger.propagate = False
 
 # ---------------------------
 # Utils: AWS region resolution (like orchestrator)
+# ---------------------------------------------------------
+# Per-account log buffers
+# ---------------------------------------------------------
+_account_logs = {}       # { account_number: [str, str, ...] }
+_account_logs_lock = threading.Lock()
+
+def log_step(acct: int, text: str):
+    """
+    Append a line to that account's log buffer.
+    """
+    with _account_logs_lock:
+        if acct not in _account_logs:
+            _account_logs[acct] = []
+        _account_logs[acct].append(text)
+
+def flush_account_log(acct: int, prefix: str):
+    """
+    Emit ONE log to CloudWatch for this account,
+    then clear the buffer.
+    """
+    with _account_logs_lock:
+        buf = _account_logs.get(acct, [])
+        if not buf:
+            return
+        combined = "\n".join(buf)
+        logger.info(f"=== {prefix} acct={acct} BEGIN ===\n{combined}\n=== {prefix} END ===")
+        _account_logs[acct] = []  # clear
+
+
 # ---------------------------
 def resolved_region() -> str:
     # INFO: region resolution
@@ -452,10 +483,10 @@ def build_contract(tv_symbol: str) -> Contract:
         local_symbol = info.get("localSymbol", "")
         ltm = info.get("lastTradeDateOrContractMonth", "")
 
-        logger.info(
-            f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
-            f"| currency={currency} | local_symbol={local_symbol}"
-        )
+        # logger.info(
+        #     f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
+        #     f"| currency={currency} | local_symbol={local_symbol}"
+        # )
 
         return Future(
             symbol=symbol,
@@ -526,12 +557,14 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     take_profit = _to_float(payload.get("takeProfit"))
     stop_loss = _to_float(payload.get("stopLoss"))
     target_pct = _to_float(payload.get("targetPercentage"))
-    risk_ok = (
-    (take_profit is not None and stop_loss is not None)
-    or
-    (target_pct is not None and stop_loss is not None)
-    )
+    # risk_ok = (
+    # (take_profit is not None and stop_loss is not None)
+    # or
+    # (target_pct is not None and stop_loss is not None)
+    # )
+    risk_ok = (take_profit is not None and stop_loss is not None)
 
+    
     # Exits
     if "exit" in a and "long" in a:
         return Signal(
@@ -607,45 +640,67 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-    logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
+    #logger.info(f"[IB] Connecting host={host} port={port} client_id={client_id} timeout={IB_CONNECT_TIMEOUT_SEC}")
     ib = IB()
-    ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
+
+    try:
+        ib.connect(host, port, clientId=client_id, timeout=IB_CONNECT_TIMEOUT_SEC)
+    except Exception as e:
+        # logger.error(
+        #     f"[IB][ERROR] Connection FAILED host={host} port={port} clientId={client_id} err={e}"
+        # )
+        raise  # rethrow so execute_signal_for_account() can catch it
+    
+    #logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
+    
+    # Clean event handlers AFTER successful connection
     ib.execDetailsEvent.clear()
     ib.commissionReportEvent.clear()
     ib.orderStatusEvent.clear()
     ib.openOrderEvent.clear()
-    logger.info(f"[IB] Connected host={host} port={port} client_id={client_id}")
+    
     return ib
 
-def cancel_all_open_orders(ib: IB, reason: str) -> int:
+
+def cancel_all_open_orders(ib: IB, reason: str, acct: int) -> int:
     """
-    Cancels ALL open orders currently known to this IB client (for this account).
+    Cancels ALL open orders for this account (IB client).
     Returns number of cancel attempts.
     """
     attempts = 0
 
+    # Update open orders from IB
     try:
-        # Pull latest open orders from TWS/IBG
         ib.reqOpenOrders()
         ib.waitOnUpdate(timeout=2)
-    except Exception:
-        pass
+    except Exception as e:
+        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
 
     try:
         orders = list(ib.openOrders())
-    except Exception:
+    except Exception as e:
+        log_step(acct, f"CANCEL_ORDERS_FAIL: error fetching openOrders err={e}")
         orders = []
 
+    if not orders:
+        log_step(acct, "CANCEL_ORDERS: none_found")
+        return 0
+
+    log_step(acct, f"CANCEL_ORDERS: found {len(orders)}")
+
     for o in orders:
+        oid = getattr(o, "orderId", None)
         try:
             ib.cancelOrder(o)
             attempts += 1
             ib.sleep(0.2)
-            logger.info(f"[ORDERS] Canceled open order reason={reason} orderId={getattr(o,'orderId',None)}")
+            log_step(acct, f"CANCEL_ORDER: orderId={oid} reason={reason}")
         except Exception as e:
-            logger.info(f"[ORDERS] Cancel failed reason={reason} orderId={getattr(o,'orderId',None)} err={e}")
+            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} reason={reason} err={e}")
 
+    log_step(acct, f"CANCEL_ORDERS_DONE: total_attempts={attempts}")
     return attempts
+
 
 
 
@@ -664,13 +719,30 @@ def current_position_qty(ib: IB, contract: Contract) -> int:
     return qty
 
 
-def close_position(ib: IB, contract: Contract, qty: int) -> None:
-    if qty == 0:
-        logger.info("[EXEC] Branch=FLAT_ENTRY")
-        return
+def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
+
     action = "SELL" if qty > 0 else "BUY"
-    order = MarketOrder(action, abs(int(qty)))
-    ib.placeOrder(contract, order)
+    #log_step(acct, f"CLOSE_POSITION: sending {action} {abs(qty)}")
+
+    try:
+        order = MarketOrder(action, abs(int(qty)))
+        ib.placeOrder(contract, order)
+    except Exception as e:
+        log_step(acct, f"CLOSE_POSITION_FAIL: error={e}")
+        return
+
+    # Give IB a chance to update
+    time.sleep(1)
+    ib.waitOnUpdate(timeout=1)
+
+    # Check if it actually closed
+    remaining = current_position_qty(ib, contract)
+
+    if remaining == 0:
+        log_step(acct, "CLOSE_POSITION_SUCCESS")
+    else:
+        log_step(acct, f"CLOSE_POSITION_FAIL: still_open={remaining}")
+
 
 
 
@@ -686,24 +758,29 @@ def open_position_with_brackets(
     take_profit: float | None,
     stop_loss: float | None,
     target_percentage: float | None,
+    acct: int
 ) -> None:
+
+    
 
     if take_profit is None or stop_loss is None:
         if take_profit is None and stop_loss is None:
-            logger.info("[ORDER] Take Profit and Stop Loss not defined skipping openning position")
-        if take_profit is None:
-            logger.info("[ORDER] Take Profit not defined skipping openning position")
-        if stop_loss is None:
-            logger.info("[ORDER] Stop Loss not defined skipping openning position")
+            log_step(acct, "OPEN_ENTRY_SKIPPED: TP and SL missing")
+        elif take_profit is None:
+            log_step(acct, "OPEN_ENTRY_SKIPPED: TP missing")
+        else:
+            log_step(acct, "OPEN_ENTRY_SKIPPED: SL missing")
         return
-
-    logger.info(f"[ORDER] ENTRY_BRACKET action={'BUY' if direction>0 else 'SELL'} qty={qty} symbol={getattr(contract,'localSymbol',getattr(contract,'symbol',''))}")
 
     action = "BUY" if direction > 0 else "SELL"
 
+    # ----------------------------------------------------
+    # Reference price (marketPrice or last)
+    # ----------------------------------------------------
     ticker = ib.reqMktData(contract, "", False, False)
     t0 = time.time()
     fill_price = 0.0
+
     while time.time() - t0 < 5:
         ib.waitOnUpdate(timeout=1)
         mp = ticker.marketPrice()
@@ -714,60 +791,57 @@ def open_position_with_brackets(
         if last and last > 0:
             fill_price = float(last)
             break
+
     ib.cancelMktData(contract)
 
-    logger.info(f"[ORDER] Reference price for bracket={fill_price}")
+    log_step(acct, f"ENTRY_FILL_PRICE: {fill_price}")
 
     if fill_price <= 0:
-        logger.info("[ORDER] Entry fill price unavailable; skipping TP/SL")
+        log_step(acct, "ENTRY_PRICE_FAIL: no market/last price → skip TP/SL")
         return
 
-    tp_offset = abs(fill_price) * (float(take_profit))
+    # ----------------------------------------------------
+    # Compute TP/SL prices
+    # ----------------------------------------------------
+    try:
+        tp_price = fill_price * float(abs(fill_price) * take_profit)
+    except Exception:
+        tp_price = None
 
-    sl_offset = stop_loss
+    try:
+        sl_price = fill_price * float(stop_loss)
+    except Exception:
+        sl_price = None
 
-    if tp_offset is None and sl_offset is None:
-        return
-
-    tp_price = None
-    sl_price = None
-
-    if tp_offset is not None:
-        tp_price = fill_price * float(tp_offset)
-
-    if sl_offset is not None:
-        sl_price = fill_price * float(sl_offset)
+    log_step(acct, f"TP_PRICE: {tp_price if tp_price is not None else 'none'}")
+    log_step(acct, f"SL_PRICE: {sl_price if sl_price is not None else 'none'}")
 
     exit_action = "SELL" if direction > 0 else "BUY"
 
     parent = MarketOrder(action, abs(int(qty)))
 
-    tp_order = None
-    sl_order = None
-
-    if tp_price is not None:
-        tp_order = LimitOrder(exit_action, abs(int(qty)), float(tp_price))
-
-    if sl_price is not None:
-        sl_order = StopOrder(exit_action, abs(int(qty)), float(sl_price))
+    tp_order = LimitOrder(exit_action, abs(int(qty)), float(tp_price)) if tp_price else None
+    sl_order = StopOrder(exit_action, abs(int(qty)), float(sl_price)) if sl_price else None
 
     br = BracketOrder(parent, tp_order, sl_order)
 
-    # if br.parent is not None:
-    #     br.parent.transmit = False
-    # if br.takeProfit is not None:
-    #     br.takeProfit.transmit = False
-    # if br.stopLoss is not None:
-    #     br.stopLoss.transmit = True
-
+    # ----------------------------------------------------
+    # Submit orders
+    # ----------------------------------------------------
     for o in br:
-        ib.placeOrder(contract, o)
+        try:
+            ib.placeOrder(contract, o)
+            log_step(
+                acct,
+                f"BRACKET_ORDER: {o.orderType} {o.action} qty={o.totalQuantity} "
+                f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)}"
+            )
+        except Exception as e:
+            log_step(acct, f"BRACKET_ORDER_FAIL: err={e}")
+            return
 
-    logger.info(
-        f"Placed TP/SL via BracketOrder ref={fill_price} "
-        f"tp={tp_price if tp_price is not None else 'none'} "
-        f"sl={sl_price if sl_price is not None else 'none'}"
-    )
+    #log_step(acct, "BRACKET_ORDER_DONE")
+
 
 
 
@@ -776,7 +850,7 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
         qty = current_position_qty(ib, contract)
         if qty == 0:
             return True
-        logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
+        #logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
         ib.sleep(0.1)
         time.sleep(1)
     return False
@@ -787,7 +861,7 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
 # ---------------------------
 def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    logger.info("Preclose potential position closing")
+    #logger.info("Preclose potential position closing")
 
 
     dayk = state_key_for_day(now_local.date())
@@ -799,6 +873,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
     # Close each account independently; sequential is fine here (only 1x/day).
     for acc in accounts:
+        log_step(acc, "Preclose potential position closing")
         try:
             with _state_lock:
                 st = load_state()
@@ -807,7 +882,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                 continue
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
-            logger.info(f"[EXEC] IB connected acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[EXEC] IB connected acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             pos = ib.positions()
             
             # Snapshot + cancel open orders (TP/SL etc.)
@@ -818,56 +893,60 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                 pass
             
             open_orders = list(ib.openOrders())
+            if not open_orders:
+                log_step(acc, "No open orders to cancel")
+            else:
+                orders_snapshot: List[Dict[str, Any]] = []
+                for o in open_orders:
+                    try:
+                        orders_snapshot.append({
+                            "orderId": getattr(o, "orderId", None),
+                            "action": getattr(o, "action", None),
+                            "totalQuantity": getattr(o, "totalQuantity", None),
+                            "orderType": getattr(o, "orderType", None),
+                            "lmtPrice": getattr(o, "lmtPrice", None),
+                            "auxPrice": getattr(o, "auxPrice", None),
+                            "tif": getattr(o, "tif", None),
+                        
+                            # NEW — contract identity so we can rebuild order:
+                            "conId": getattr(o.contract, "conId", None),
+                            "symbol": getattr(o.contract, "symbol", None),
+                            "secType": getattr(o.contract, "secType", None),
+                            "exchange": getattr(o.contract, "exchange", None),
+                            "localSymbol": getattr(o.contract, "localSymbol", None),
+                            "ltm": getattr(o.contract, "lastTradeDateOrContractMonth", None),
+                        })
+    
+                    except Exception:
+                        continue
+                
+                cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number)
+
             
-            orders_snapshot: List[Dict[str, Any]] = []
-            for o in open_orders:
-                try:
-                    orders_snapshot.append({
-                        "orderId": getattr(o, "orderId", None),
-                        "action": getattr(o, "action", None),
-                        "totalQuantity": getattr(o, "totalQuantity", None),
-                        "orderType": getattr(o, "orderType", None),
-                        "lmtPrice": getattr(o, "lmtPrice", None),
-                        "auxPrice": getattr(o, "auxPrice", None),
-                        "tif": getattr(o, "tif", None),
-                    
-                        # NEW — contract identity so we can rebuild order:
-                        "conId": getattr(o.contract, "conId", None),
-                        "symbol": getattr(o.contract, "symbol", None),
-                        "secType": getattr(o.contract, "secType", None),
-                        "exchange": getattr(o.contract, "exchange", None),
-                        "localSymbol": getattr(o.contract, "localSymbol", None),
-                        "ltm": getattr(o.contract, "lastTradeDateOrContractMonth", None),
-                    })
+            if not pos:
+                log_step(acc, "No open position to close")
+            else:
+                snapshot: Dict[str, Any] = {}
+                for p in pos:
+                    if int(p.position) != 0:
+                        key = str(getattr(p.contract, "conId", "")) or f"{p.contract.secType}:{p.contract.symbol}:{getattr(p.contract, 'exchange', '')}"
+                        snapshot[key] = {
+                            "secType": p.contract.secType,
+                            "symbol": p.contract.symbol,
+                            "exchange": getattr(p.contract, "exchange", ""),
+                            "currency": getattr(p.contract, "currency", ""),
+                            "lastTradeDateOrContractMonth": getattr(p.contract, "lastTradeDateOrContractMonth", ""),
+                            "position": int(p.position),
+                        }
+    
+                for p in pos:
+                    q = int(p.position)
+                    if q == 0:
+                        continue
+                    log_step(acc, f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
+                    close_position(ib, p.contract, q)
 
-                except Exception:
-                    continue
-            
-            cancel_all_open_orders(ib, reason="preclose")
-
-            
-
-            snapshot: Dict[str, Any] = {}
-            for p in pos:
-                if int(p.position) != 0:
-                    key = str(getattr(p.contract, "conId", "")) or f"{p.contract.secType}:{p.contract.symbol}:{getattr(p.contract, 'exchange', '')}"
-                    snapshot[key] = {
-                        "secType": p.contract.secType,
-                        "symbol": p.contract.symbol,
-                        "exchange": getattr(p.contract, "exchange", ""),
-                        "currency": getattr(p.contract, "currency", ""),
-                        "lastTradeDateOrContractMonth": getattr(p.contract, "lastTradeDateOrContractMonth", ""),
-                        "position": int(p.position),
-                    }
-
-            for p in pos:
-                q = int(p.position)
-                if q == 0:
-                    continue
-                logger.info(f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
-                close_position(ib, p.contract, q)
-
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
             ib.disconnect()
 
@@ -885,18 +964,19 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                 }
                 save_state(st)
 
-            logger.info(f"Preclose: acct={acc.account_number} completed snapshot_count={len(snapshot)}")
+            log_step(acc, f"Preclose: acct={acc.account_number} completed snapshot_count={len(snapshot)}")
         except Exception as e:
-            logger.exception(f"Preclose error acct={acc.account_number}: {e}")
+            log_step(acc, f"Preclose error acct={acc.account_number}: {e}")
 
 
 def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    logger.info("Postopen potential position reopen")
+    
 
     dayk = state_key_for_day(now_local.date())
 
     for acc in accounts:
+        log_step(acc, "Postopen potential position reopen")
         try:
             with _state_lock:
                 st = load_state()
@@ -915,8 +995,8 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
             # Only reopen if currently flat for this account
             any_open = any(int(p.position) != 0 for p in ib.positions())
             if any_open:
-                logger.info(f"Postopen: acct={acc.account_number} not flat; will not reopen.")
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                log_step(acc, f"Postopen: acct={acc.account_number} not flat; will not reopen.")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
 
@@ -926,8 +1006,8 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     st["preclose"][dayk][str(acc.account_number)]["reopen_done"] = True
                     st["preclose"][dayk][str(acc.account_number)]["reopen_at"] = now_local.isoformat()
                     save_state(st)
-                logger.info(f"Postopen: acct={acc.account_number} nothing to reopen (empty snapshot).")
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                log_step(acc, f"Postopen: acct={acc.account_number} nothing to reopen (empty snapshot).")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
 
@@ -968,26 +1048,26 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     if ot == "STP" and aux is not None:
                         sl_price = float(aux)
             
-                logger.info(
+                log_step(acc, 
                     f"[POSTOPEN] Reopening with bracket acct={acc.account_number} "
                     f"symbol={c.symbol} dir={direction} qty={qty} "
                     f"tp={tp_price} sl={sl_price}"
                 )
             
                 # If both exist → use bracket
-                if tp_price is not None and sl_price is not None:
-                    open_position_with_brackets(
-                        ib,
-                        c,
-                        direction,
-                        qty,
-                        take_profit = tp_price / 1.0,       # because your bracket fn expects multipliers? NO — prices: pass raw prices
-                        stop_loss  = sl_price,
-                        target_percentage = None
-                    )
-                else:
-                    # Fallback: open without bracket if snapshot incomplete
-                    open_position(ib, c, direction, qty)
+                # if tp_price is not None and sl_price is not None:
+                open_position_with_brackets(
+                    ib,
+                    c,
+                    direction,
+                    qty,
+                    take_profit = tp_price,       # because your bracket fn expects multipliers? NO — prices: pass raw prices
+                    stop_loss  = sl_price,
+                    target_percentage = None,
+                    acct=acc.account_number 
+                )
+
+            
             
                 time.sleep(1)
 
@@ -996,7 +1076,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
 
 
 
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
             ib.disconnect()
 
@@ -1006,9 +1086,9 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 st["preclose"][dayk][str(acc.account_number)]["reopen_at"] = now_local.isoformat()
                 save_state(st)
 
-            logger.info(f"Postopen: acct={acc.account_number} completed reopen cycle.")
+            #logger.info(f"Postopen: acct={acc.account_number} completed reopen cycle.")
         except Exception as e:
-            logger.exception(f"Postopen error acct={acc.account_number}: {e}")
+            log_step(acc, f"Postopen error acct={acc.account_number}: {e}")
 
 
 def parse_timestamp(value) -> float | None:
@@ -1049,7 +1129,10 @@ def parse_timestamp(value) -> float | None:
 # Per-account signal execution
 # ---------------------------
 def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings) -> Dict[str, Any]:
-    logger.info(f"[EXEC] Start acct={acc.account_number} port={acc.api_port} client_id={acc.client_id} alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty}")
+    #logger.info(f"[EXEC] Start acct={acc.account_number} port={acc.api_port} client_id={acc.client_id} alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty}")
+    log_step(acc.account_number,
+         f"EXEC_START alert={sig.raw_alert} symbol={sig.symbol} dir={sig.desired_direction} qty={sig.desired_qty}")
+
     result = {
         "account_number": acc.account_number,
         "secret_name": acc.secret_name,
@@ -1065,20 +1148,35 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         asyncio.set_event_loop(loop)
 
     try:
-        ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
+        try:
+            ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
+        except Exception as e:
+            # LOG PER ACCOUNT (your new unified log)
+            log_step(acc.account_number, "IB_CONNECT_FAIL port")
+            
+            # Return failure cleanly
+            return {
+                "account_number": acc.account_number,
+                "secret_name": acc.secret_name,
+                "api_port": acc.api_port,
+                "client_id": acc.client_id,
+                "ok": False,
+                "error": f"connection_failed: {e}",
+            }
+
 
         contract = build_contract(sig.symbol)
         # Qualify contract and detect ambiguity
         qualified = ib.qualifyContracts(contract)
-        logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
+        #logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
         
         # If 0 or more than 1 contract returned → ambiguous
         if not qualified or len(qualified) != 1:
-            logger.info(
+            log_step(acc.account_number, 
                 f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                 f"qualified_count={len(qualified)}"
             )
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             result.update({
                 "ok": True,
@@ -1094,8 +1192,41 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
 
         qty = current_position_qty(ib, contract)
-        logger.info(f"acct={acc.account_number} BEFORE symbol={sig.symbol} "
-                    f"alert={sig.raw_alert} qty={qty}")
+        
+        # Position info
+        if qty != 0:
+            side = "BUY" if qty > 0 else "SELL"
+            log_step(acc.account_number, f"CURRENT_POSITION: {side} {abs(qty)}")
+        else:
+            log_step(acc.account_number, "CURRENT_POSITION: FLAT")
+        
+        # Always list all open orders for this account (no filtering)
+        try:
+            ib.reqOpenOrders()
+            ib.waitOnUpdate(timeout=1)
+            open_orders = ib.openOrders()
+        except:
+            open_orders = []
+        
+        if open_orders:
+            lines = []
+            for o in open_orders:
+                try:
+                    lines.append(
+                        f"{o.orderType} {o.action} qty={o.totalQuantity} "
+                        f"lmt={getattr(o,'lmtPrice',None)} "
+                        f"stp={getattr(o,'auxPrice',None)} tif={o.tif} "
+                        f"conId={getattr(o.contract,'conId',None)} "
+                        f"symbol={getattr(o.contract,'localSymbol',o.contract.symbol)}"
+                    )
+                except:
+                    continue
+        
+            log_step(acc.account_number, "OPEN_ORDERS:\n  " + "\n  ".join(lines))
+        else:
+            log_step(acc.account_number, "OPEN_ORDERS: NONE")
+
+
 
         # ----------------------------------------------------------
         # NEW: latency check (using auto-detected timestamp)
@@ -1111,17 +1242,19 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         allow_entry = True
         if sig.desired_direction != 0 and sig_age is not None:
             if sig_age > int(settings.execution_delay):
+                log_step(acc.account_number, f"[EXEC] Entry not executed: the execution is delayed by more than {int(settings.execution_delay)} relative to the signal")
                 allow_entry = False
-        logger.info(f"[EXEC] latency_check sig_age={sig_age} execution_delay={int(settings.execution_delay)} allow_entry={allow_entry}")
+        #logger.info(f"[EXEC] latency_check sig_age={sig_age} execution_delay={int(settings.execution_delay)} allow_entry={allow_entry}")
 
         # ----------------------------------------------------------
         # EXIT (ALWAYS perform exit, ignore latency)
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
-            logger.info(f"[EXEC] Branch=EXIT acct={acc.account_number} current_qty={qty}")
+            #logger.info(f"[EXEC] Branch=EXIT acct={acc.account_number} current_qty={qty}")
             if qty == 0:
+                log_step(acc.account_number, "No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
 
@@ -1131,18 +1264,17 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Retry logic
             if not wait_until_flat(ib, contract, settings):
-                logger.info("Exit close not reflected — retrying")
+                log_step(acc.account_number, "Exit close not reflected — retrying")
                 #close_position(ib, contract, qty)
                 time.sleep(1)
 
-                if not wait_until_flat(ib, contract, settings):
-                    result.update({"ok": False, "action": "exit_failed_after_retry"})
-                    logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
-                    ib.disconnect()
-                    return result
-
+                result.update({"ok": False, "action": "exit_failed_after_retry"})
+                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                ib.disconnect()
+                return result
+            log_step(acc.account_number, "Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             return result
 
@@ -1153,9 +1285,9 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         desired_qty = sig.desired_qty if sig.desired_qty > 0 else DEFAULT_QTY
 
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
-            logger.info(f"[EXEC] Branch=NOOP_SAME_DIRECTION acct={acc.account_number} current_qty={qty} desired_dir={desired_dir}")
+            log_step(acc.account_number, "[EXEC] Same direction position already opened. Skipping execution")
             result.update({"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             return result
 
@@ -1163,17 +1295,17 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # REVERSAL (close ALWAYS, but entry obeys latency)
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
-            logger.info(f"[EXEC] Branch=REVERSAL acct={acc.account_number} current_qty={qty} desired_dir={desired_dir}")
+            log_step(acc.account_number, f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(ib, contract, qty)
             time.sleep(1)
 
             # Retry close
             if not wait_until_flat(ib, contract, settings):
-                logger.info("Reversal close not reflected — retrying")
+                log_step(acc.account_number, "Reversal close not reflected — retrying")
                 #close_position(ib, contract, qty)
                 time.sleep(1)
                 result.update({"ok": False, "action": "reversal_close_not_confirmed"})
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
 
@@ -1190,28 +1322,36 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                     "action": "reversal_closed_but_entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
             
             if not sig.risk_valid:
+                log_step(acc.account_number, "[EXEC] TP or SL not specified. Skipping execution")
                 result.update({
                     "ok": True,
                     "action": "reversal_closed_but_entry_skipped_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
             
-            cancel_all_open_orders(ib, reason="before_reversal_entry")
+            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number)
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
             open_position_with_brackets(
-                ib, contract, desired_dir, desired_qty,
-                sig.take_profit, sig.stop_loss, sig.target_percentage
+                ib,
+                contract,
+                desired_dir,
+                desired_qty,
+                sig.take_profit,
+                sig.stop_loss,
+                sig.target_percentage,
+                acc.account_number    # <<< NEW
             )
+
             logger.info(f"[EXEC] Entry order submitted acct={acc.account_number} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
@@ -1240,23 +1380,31 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 return result
             
             if desired_dir != 0 and not sig.risk_valid:
+                log_step(acc.account_number, "[EXEC] TP or SL not specified. Skipping execution")
                 result.update({
                     "ok": True,
                     "action": "entry_ignored_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 return result
 
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-            cancel_all_open_orders(ib, reason="before_new_entry")
+            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number)
             open_position_with_brackets(
-                ib, contract, desired_dir, desired_qty,
-                sig.take_profit, sig.stop_loss, sig.target_percentage
+                ib,
+                contract,
+                desired_dir,
+                desired_qty,
+                sig.take_profit,
+                sig.stop_loss,
+                sig.target_percentage,
+                acc.account_number    # <<< NEW
             )
+
             logger.info(f"[EXEC] Entry order submitted acct={acc.account_number} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
