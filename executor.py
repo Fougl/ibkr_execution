@@ -967,6 +967,9 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
             log_step(acc, f"Preclose: acct={acc.account_number} completed snapshot_count={len(snapshot)}")
         except Exception as e:
             log_step(acc, f"Preclose error acct={acc.account_number}: {e}")
+        finally:
+            flush_account_log(acc.account_number, "PRECLOSE_EXEC")
+        
 
 
 def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
@@ -1089,6 +1092,8 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
             #logger.info(f"Postopen: acct={acc.account_number} completed reopen cycle.")
         except Exception as e:
             log_step(acc, f"Postopen error acct={acc.account_number}: {e}")
+        finally:
+            flush_account_log(acc.account_number, "POSTOPEN_EXEC")
 
 
 def parse_timestamp(value) -> float | None:
@@ -1155,6 +1160,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             log_step(acc.account_number, "IB_CONNECT_FAIL port")
             
             # Return failure cleanly
+            flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return {
                 "account_number": acc.account_number,
                 "secret_name": acc.secret_name,
@@ -1185,6 +1191,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 "reason": "ambiguous_contract",
                 "qualified_count": len(qualified)
             })
+            flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
         
         # Use the resolved contract
@@ -1256,6 +1263,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 result.update({"ok": True, "action": "none_already_flat"})
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
 
             # Close existing position
@@ -1271,11 +1279,13 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 result.update({"ok": False, "action": "exit_failed_after_retry"})
                 logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             log_step(acc.account_number, "Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
             #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
+            flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
 
         # ----------------------------------------------------------
@@ -1289,6 +1299,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             result.update({"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
             #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
+            flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
 
         # ----------------------------------------------------------
@@ -1307,6 +1318,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 result.update({"ok": False, "action": "reversal_close_not_confirmed"})
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
 
                 # if not wait_until_flat(ib, contract, settings):
@@ -1324,6 +1336,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 })
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
             if not sig.risk_valid:
@@ -1335,6 +1348,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 })
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
             cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number)
@@ -1362,6 +1376,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             })
             logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
+            flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
 
         # ----------------------------------------------------------
@@ -1377,6 +1392,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 })
                 logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
             if desired_dir != 0 and not sig.risk_valid:
@@ -1388,6 +1404,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 })
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
+                flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
 
 
@@ -1415,6 +1432,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             })
             logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
+            flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
 
         # ----------------------------------------------------------
@@ -1423,11 +1441,15 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         result.update({"ok": False, "action": "ambiguous_state", "current_qty": qty})
         logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
         ib.disconnect()
+        flush_account_log(acc.account_number, "WEBHOOK_EXEC")
         return result
 
     except Exception as e:
         result.update({"ok": False, "error": str(e)})
+        flush_account_log(acc.account_number, "WEBHOOK_EXEC")
         return result
+    finally:
+        flush_account_log(acc.account_number, "WEBHOOK_EXEC")
 
 def background_scheduler_loop():
     """
