@@ -968,7 +968,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
         except Exception as e:
             log_step(acc.account_number, f"Preclose error acct={acc.account_number}: {e}")
         finally:
-            flush_account_log(acc.account_number.account_number, "PRECLOSE_EXEC")
+            flush_account_log(acc.account_number, "PRECLOSE_EXEC")
         
 
 
@@ -1093,7 +1093,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
         except Exception as e:
             log_step(acc.account_number, f"Postopen error acct={acc.account_number}: {e}")
         finally:
-            flush_account_log(acc.account_number.account_number, "POSTOPEN_EXEC")
+            flush_account_log(acc.account_number, "POSTOPEN_EXEC")
 
 
 def parse_timestamp(value) -> float | None:
@@ -1374,7 +1374,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
@@ -1422,7 +1422,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 acc.account_number    # <<< NEW
             )
 
-            logger.info(f"[EXEC] Entry order submitted acct={acc.account_number} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
+            #logger.info(f"[EXEC] Entry order submitted acct={acc.account_number} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
                 "ok": True,
@@ -1439,7 +1439,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # Should never reach here
         # ----------------------------------------------------------
         result.update({"ok": False, "action": "ambiguous_state", "current_qty": qty})
-        logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+        #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
         ib.disconnect()
         flush_account_log(acc.account_number, "WEBHOOK_EXEC")
         return result
