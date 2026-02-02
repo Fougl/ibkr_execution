@@ -58,7 +58,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 import pytz
 from flask import Flask, jsonify, request
-from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder  # type: ignore
+from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, BracketOrder  # type: ignore
 import asyncio
 
 
@@ -673,21 +673,7 @@ def close_position(ib: IB, contract: Contract, qty: int) -> None:
     ib.placeOrder(contract, order)
 
 
-def open_position(ib: IB, contract: Contract, direction: int, qty: int) -> None:
-    if direction not in (+1, -1):
-        raise ValueError("direction must be +1 (long) or -1 (short)")
-    action = "BUY" if direction > 0 else "SELL"
-    order = MarketOrder(action, abs(int(qty)))
-    trade = ib.placeOrder(contract, order)
-    
-    ib.waitOnUpdate(timeout=3)
-    
-    logger.info(
-        f"[FILL] acct={ib.clientId} {action} {qty} {contract.localSymbol} "
-        f"status={trade.orderStatus.status} "
-        f"filled={trade.orderStatus.filled} "
-        f"avgFillPrice={trade.orderStatus.avgFillPrice}"
-    )
+
 
 
 
@@ -701,84 +687,88 @@ def open_position_with_brackets(
     stop_loss: float | None,
     target_percentage: float | None,
 ) -> None:
-    """
-    Places a MARKET entry and then (optionally) places TP/SL as OCA child orders.
-    - take_profit / stop_loss are interpreted as PRICE OFFSETS (e.g. 1.0 = 1.0 points).
-    - target_percentage is interpreted as % of filled entry price (used only if take_profit is not provided).
-    """
-    # If no risk params provided, keep original behavior
-    if take_profit is None and stop_loss is None and target_percentage is None:
-        open_position(ib, contract, direction, qty)
+
+    if take_profit is None or stop_loss is None:
+        if take_profit is None and stop_loss is None:
+            logger.info("[ORDER] Take Profit and Stop Loss not defined skipping openning position")
+        if take_profit is None:
+            logger.info("[ORDER] Take Profit not defined skipping openning position")
+        if stop_loss is None:
+            logger.info("[ORDER] Stop Loss not defined skipping openning position")
         return
 
-    # 1) Market entry
     logger.info(f"[ORDER] ENTRY_BRACKET action={'BUY' if direction>0 else 'SELL'} qty={qty} symbol={getattr(contract,'localSymbol',getattr(contract,'symbol',''))}")
-    action = "BUY" if direction > 0 else "SELL"
-    parent = MarketOrder(action, abs(int(qty)))
-    trade = ib.placeOrder(contract, parent)
 
-    # Wait for fill to get avgFillPrice
+    action = "BUY" if direction > 0 else "SELL"
+
+    ticker = ib.reqMktData(contract, "", False, False)
     t0 = time.time()
     fill_price = 0.0
-    while time.time() - t0 < 20:
+    while time.time() - t0 < 5:
         ib.waitOnUpdate(timeout=1)
-        try:
-            fill_price = float(getattr(trade.orderStatus, "avgFillPrice", 0) or 0)
-        except Exception:
-            fill_price = 0.0
-        if fill_price > 0:
+        mp = ticker.marketPrice()
+        if mp and mp > 0:
+            fill_price = float(mp)
             break
-    logger.info(f"[ORDER] Entry filled avgFillPrice={fill_price}")
+        last = getattr(ticker, "last", 0) or 0
+        if last and last > 0:
+            fill_price = float(last)
+            break
+    ib.cancelMktData(contract)
+
+    logger.info(f"[ORDER] Reference price for bracket={fill_price}")
 
     if fill_price <= 0:
-        logger.info("[ORDER] Entry fill price not available after waiting; will skip TP/SL")
-        # If we couldn't get a fill price, fall back to original behavior (no brackets)
-        logger.info("Entry filled price unavailable; skipping TP/SL placement.")
+        logger.info("[ORDER] Entry fill price unavailable; skipping TP/SL")
         return
 
-    # Derive TP offset if targetPercentage provided and takeProfit absent
-    tp_offset = take_profit
-    if tp_offset is None and target_percentage is not None:
-        tp_offset = abs(fill_price) * (float(target_percentage) / 100.0)
+    tp_offset = abs(fill_price) * (float(take_profit))
 
     sl_offset = stop_loss
 
-    # Nothing to place
     if tp_offset is None and sl_offset is None:
         return
 
-    # Compute TP/SL absolute prices
-    # Long: TP above, SL below. Short: TP below, SL above.
     tp_price = None
     sl_price = None
-    if tp_offset is not None:
-        tp_price = fill_price + (direction * float(tp_offset))
-    if sl_offset is not None:
-        sl_price = fill_price - (direction * float(sl_offset))
 
-    # 2) Place OCA TP/SL orders
+    if tp_offset is not None:
+        tp_price = fill_price * float(tp_offset)
+
+    if sl_offset is not None:
+        sl_price = fill_price * float(sl_offset)
+
     exit_action = "SELL" if direction > 0 else "BUY"
-    oca = f"OCA_{int(time.time()*1000)}_{os.getpid()}"
+
+    parent = MarketOrder(action, abs(int(qty)))
+
+    tp_order = None
+    sl_order = None
 
     if tp_price is not None:
         tp_order = LimitOrder(exit_action, abs(int(qty)), float(tp_price))
-        tp_order.ocaGroup = oca
-        tp_order.ocaType = 1
-        tp_order.transmit = False
-        ib.placeOrder(contract, tp_order)
 
     if sl_price is not None:
         sl_order = StopOrder(exit_action, abs(int(qty)), float(sl_price))
-        sl_order.ocaGroup = oca
-        sl_order.ocaType = 1
-        sl_order.transmit = True
-        ib.placeOrder(contract, sl_order)
+
+    br = BracketOrder(parent, tp_order, sl_order)
+
+    # if br.parent is not None:
+    #     br.parent.transmit = False
+    # if br.takeProfit is not None:
+    #     br.takeProfit.transmit = False
+    # if br.stopLoss is not None:
+    #     br.stopLoss.transmit = True
+
+    for o in br:
+        ib.placeOrder(contract, o)
 
     logger.info(
-        f"Placed TP/SL OCA={oca} fill={fill_price} "
+        f"Placed TP/SL via BracketOrder ref={fill_price} "
         f"tp={tp_price if tp_price is not None else 'none'} "
         f"sl={sl_price if sl_price is not None else 'none'}"
     )
+
 
 
 def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
@@ -944,62 +934,65 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
             for _, meta in snapshot.items():
                 if meta.get("secType") != "FUT":
                     continue
+            
+                # rebuild contract
                 c = Future(
                     symbol=meta.get("symbol", ""),
                     lastTradeDateOrContractMonth=meta.get("lastTradeDateOrContractMonth", ""),
                     exchange=meta.get("exchange", ""),
                     currency=meta.get("currency", "USD"),
+                    localSymbol=meta.get("localSymbol", None),
                 )
+            
                 direction = +1 if int(meta.get("position", 0)) > 0 else -1
                 qty = abs(int(meta.get("position", 0)))
-                logger.info(f"Postopen: acct={acc.account_number} reopening {c.symbol} dir={'LONG' if direction>0 else 'SHORT'} qty={qty}")
-                open_position(ib, c, direction, qty)
-                time.sleep(1)
-
-            # ========== RESTORE PRE-CLOSE BRACKET ORDERS ==========
-            for om in orders_snapshot:
-                try:
-                    conId = om.get("conId")
-                    if not conId:
+            
+                # ------------------------------
+                # Extract TP/SL from orders_snapshot
+                # ------------------------------
+                tp_price = None
+                sl_price = None
+            
+                for om in orders_snapshot:
+                    # Only match orders for THIS contract (conId is safest)
+                    if om.get("conId") != getattr(c, "conId", None):
                         continue
             
-                    qty = int(float(om.get("totalQuantity") or 0))
-                    if qty <= 0:
-                        continue
-            
-                    action = (om.get("action") or "").upper()
+                    ot = om.get("orderType")
                     lmt = om.get("lmtPrice")
                     aux = om.get("auxPrice")
             
-                    # Rebuild contract
-                    c = Future(
-                        symbol=om.get("symbol", ""),
-                        lastTradeDateOrContractMonth=om.get("ltm", ""),
-                        exchange=om.get("exchange", ""),
-                        currency="USD",
-                        localSymbol=om.get("localSymbol", ""),
+                    if ot == "LMT" and lmt is not None:
+                        tp_price = float(lmt)
+            
+                    if ot == "STP" and aux is not None:
+                        sl_price = float(aux)
+            
+                logger.info(
+                    f"[POSTOPEN] Reopening with bracket acct={acc.account_number} "
+                    f"symbol={c.symbol} dir={direction} qty={qty} "
+                    f"tp={tp_price} sl={sl_price}"
+                )
+            
+                # If both exist → use bracket
+                if tp_price is not None and sl_price is not None:
+                    open_position_with_brackets(
+                        ib,
+                        c,
+                        direction,
+                        qty,
+                        take_profit = tp_price / 1.0,       # because your bracket fn expects multipliers? NO — prices: pass raw prices
+                        stop_loss  = sl_price,
+                        target_percentage = None
                     )
+                else:
+                    # Fallback: open without bracket if snapshot incomplete
+                    open_position(ib, c, direction, qty)
             
-                    # Determine buy/sell direction for TP/SL
-                    if action == "SELL":
-                        exit_action = "SELL"
-                    else:
-                        exit_action = "BUY"
+                time.sleep(1)
+
+
             
-                    if om.get("orderType") == "LMT" and lmt is not None:
-                        tp = LimitOrder(exit_action, qty, float(lmt))
-                        ib.placeOrder(c, tp)
-                        ib.sleep(1)
-                        logger.info(f"[POSTOPEN] Recreated TP order {tp.orderId} price={lmt}")
-            
-                    if om.get("orderType") == "STP" and aux is not None:
-                        sl = StopOrder(exit_action, qty, float(aux))
-                        ib.placeOrder(c, sl)
-                        ib.sleep(1)
-                        logger.info(f"[POSTOPEN] Recreated SL order {sl.orderId} price={aux}")
-            
-                except Exception as e:
-                    logger.info(f"[POSTOPEN] Failed restoring order err={e}")
 
 
 
