@@ -158,18 +158,36 @@ def log_step(acct: int, text: str):
             _account_logs[acct] = []
         _account_logs[acct].append(text)
 
-def flush_account_log(acct: int, prefix: str):
-    """
-    Emit ONE log to CloudWatch for this account,
-    then clear the buffer.
-    """
-    with _account_logs_lock:
-        buf = _account_logs.get(acct, [])
-        if not buf:
+# def flush_account_log(acct: int, prefix: str):
+#     """
+#     Emit ONE log to CloudWatch for this account,
+#     then clear the buffer.
+#     """
+#     with _account_logs_lock:
+#         buf = _account_logs.get(acct, [])
+#         if not buf:
+#             return
+#         combined = "\n".join(buf)
+#         logger.info(f"=== {prefix} acct={acct} BEGIN ===\n{combined}\n=== {prefix} END ===")
+#         _account_logs[acct] = []  # clear
+        
+def flush_account_log(acct: int, header: str):
+    try:
+        lines = _account_logs.get(acct, [])
+        if not lines:
             return
-        combined = "\n".join(buf)
-        logger.info(f"=== {prefix} acct={acct} BEGIN ===\n{combined}\n=== {prefix} END ===")
-        _account_logs[acct] = []  # clear
+
+        msg = "\n".join([
+            f"=== {header} acct={acct} BEGIN ===",
+            *lines,
+            f"=== {header} END ==="
+        ])
+
+        logger.info(msg)
+
+    finally:
+        _account_logs[acct] = []
+
 
 
 # ---------------------------
