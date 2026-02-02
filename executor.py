@@ -873,7 +873,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
     # Close each account independently; sequential is fine here (only 1x/day).
     for acc in accounts:
-        log_step(acc, "Preclose potential position closing")
+        log_step(acc.account_number, "Preclose potential position closing")
         try:
             with _state_lock:
                 st = load_state()
@@ -894,7 +894,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
             
             open_orders = list(ib.openOrders())
             if not open_orders:
-                log_step(acc, "No open orders to cancel")
+                log_step(acc.account_number, "No open orders to cancel")
             else:
                 orders_snapshot: List[Dict[str, Any]] = []
                 for o in open_orders:
@@ -924,7 +924,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
             
             if not pos:
-                log_step(acc, "No open position to close")
+                log_step(acc.account_number, "No open position to close")
             else:
                 snapshot: Dict[str, Any] = {}
                 for p in pos:
@@ -943,7 +943,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     q = int(p.position)
                     if q == 0:
                         continue
-                    log_step(acc, f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
+                    log_step(acc.account_number, f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
                     close_position(ib, p.contract, q)
 
             #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
@@ -964,11 +964,11 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                 }
                 save_state(st)
 
-            log_step(acc, f"Preclose: acct={acc.account_number} completed snapshot_count={len(snapshot)}")
+            log_step(acc.account_number, f"Preclose: acct={acc.account_number} completed snapshot_count={len(snapshot)}")
         except Exception as e:
-            log_step(acc, f"Preclose error acct={acc.account_number}: {e}")
+            log_step(acc.account_number, f"Preclose error acct={acc.account_number}: {e}")
         finally:
-            flush_account_log(acc.account_number, "PRECLOSE_EXEC")
+            flush_account_log(acc.account_number.account_number, "PRECLOSE_EXEC")
         
 
 
@@ -979,7 +979,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
     dayk = state_key_for_day(now_local.date())
 
     for acc in accounts:
-        log_step(acc, "Postopen potential position reopen")
+        log_step(acc.account_number, "Postopen potential position reopen")
         try:
             with _state_lock:
                 st = load_state()
@@ -998,7 +998,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
             # Only reopen if currently flat for this account
             any_open = any(int(p.position) != 0 for p in ib.positions())
             if any_open:
-                log_step(acc, f"Postopen: acct={acc.account_number} not flat; will not reopen.")
+                log_step(acc.account_number, f"Postopen: acct={acc.account_number} not flat; will not reopen.")
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
@@ -1009,7 +1009,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     st["preclose"][dayk][str(acc.account_number)]["reopen_done"] = True
                     st["preclose"][dayk][str(acc.account_number)]["reopen_at"] = now_local.isoformat()
                     save_state(st)
-                log_step(acc, f"Postopen: acct={acc.account_number} nothing to reopen (empty snapshot).")
+                log_step(acc.account_number, f"Postopen: acct={acc.account_number} nothing to reopen (empty snapshot).")
                 #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
@@ -1051,7 +1051,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     if ot == "STP" and aux is not None:
                         sl_price = float(aux)
             
-                log_step(acc, 
+                log_step(acc.account_number, 
                     f"[POSTOPEN] Reopening with bracket acct={acc.account_number} "
                     f"symbol={c.symbol} dir={direction} qty={qty} "
                     f"tp={tp_price} sl={sl_price}"
@@ -1091,9 +1091,9 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
 
             #logger.info(f"Postopen: acct={acc.account_number} completed reopen cycle.")
         except Exception as e:
-            log_step(acc, f"Postopen error acct={acc.account_number}: {e}")
+            log_step(acc.account_number, f"Postopen error acct={acc.account_number}: {e}")
         finally:
-            flush_account_log(acc.account_number, "POSTOPEN_EXEC")
+            flush_account_log(acc.account_number.account_number, "POSTOPEN_EXEC")
 
 
 def parse_timestamp(value) -> float | None:
