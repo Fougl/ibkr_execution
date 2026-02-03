@@ -179,8 +179,8 @@ def flush_account_log(acct: int, header: str):
 
         msg = "\n".join([
             f"=== {header} acct={acct} BEGIN ===",
-            *lines,
-            f"=== {header} END ==="
+            *lines
+            #f"=== {header} END ==="
         ])
 
         logger.info(msg)
