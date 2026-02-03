@@ -675,7 +675,7 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     ib.execDetailsEvent.clear()
     ib.commissionReportEvent.clear()
     ib.orderStatusEvent.clear()
-    ib.openOrderEvent.clear()
+    #ib.openOrderEvent.clear()
     
     return ib
 
