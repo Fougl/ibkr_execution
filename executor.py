@@ -778,10 +778,9 @@ def open_position_with_brackets(
     take_profit: float | None,
     stop_loss: float | None,
     target_percentage: float | None,
-    acct: int
+    acct: int,
+    tp_sl_are_multipliers: bool = True
 ) -> None:
-
-    
 
     if take_profit is None or stop_loss is None:
         if take_profit is None and stop_loss is None:
@@ -795,63 +794,67 @@ def open_position_with_brackets(
     action = "BUY" if direction > 0 else "SELL"
 
     # ----------------------------------------------------
-    # Reference price (marketPrice or last)
+    # MARKET PRICE (reference for multipliers)
     # ----------------------------------------------------
-    # ticker = ib.reqMktData(contract, "", False, False)
-    # t0 = time.time()
-    # fill_price = 0.0
+    ref_price = None
 
-    # while time.time() - t0 < 5:
-    #     ib.waitOnUpdate(timeout=1)
-    #     mp = ticker.marketPrice()
-    #     if mp and mp > 0:
-    #         fill_price = float(mp)
-    #         break
-    #     last = getattr(ticker, "last", 0) or 0
-    #     if last and last > 0:
-    #         fill_price = float(last)
-    #         break
+    if tp_sl_are_multipliers:
+        t = ib.reqMktData(contract, "", False, False)
+        t0 = time.time()
+        while time.time() - t0 < 3:
+            ib.waitOnUpdate(timeout=0.5)
+            mp = t.marketPrice()
+            if mp and mp > 0:
+                ref_price = float(mp)
+                break
+        ib.cancelMktData(contract)
 
-    # ib.cancelMktData(contract)
-
-    # log_step(acct, f"ENTRY_FILL_PRICE: {fill_price}")
-
-    # if fill_price <= 0:
-    #     log_step(acct, "ENTRY_PRICE_FAIL: no market/last price → skip TP/SL")
-    #     return
+        if not ref_price:
+            log_step(acct, "ENTRY_PRICE_FAIL: cannot compute TP/SL — no market data")
+            return
 
     # ----------------------------------------------------
-    # Compute TP/SL prices
+    # COMPUTE TP / SL
     # ----------------------------------------------------
-    try:
-        tp_price = 7020 * float(take_profit)
-    except Exception:
-        tp_price = None
 
-    try:
-        sl_price = 7020 * float(stop_loss)
-    except Exception:
-        sl_price = None
+    if tp_sl_are_multipliers:
+        # incoming values are multipliers, e.g. 1.02, 0.995
+        try:
+            tp_price = ref_price * float(take_profit)
+        except:
+            tp_price = None
 
-    log_step(acct, f"TP_PRICE: {tp_price if tp_price is not None else 'none'}")
-    log_step(acct, f"SL_PRICE: {sl_price if sl_price is not None else 'none'}")
+        try:
+            sl_price = ref_price * float(stop_loss)
+        except:
+            sl_price = None
+
+    else:
+        # incoming values are absolute prices (postopen restore)
+        tp_price = float(take_profit) if take_profit is not None else None
+        sl_price = float(stop_loss) if stop_loss is not None else None
+
+    log_step(acct, f"TP_PRICE: {tp_price}")
+    log_step(acct, f"SL_PRICE: {sl_price}")
 
     exit_action = "SELL" if direction > 0 else "BUY"
 
     parent = MarketOrder(action, abs(int(qty)))
 
-    tp_order = LimitOrder(exit_action, abs(int(qty)), float(tp_price)) if tp_price else None
-    sl_order = StopOrder(exit_action, abs(int(qty)), float(sl_price)) if sl_price else None
+    tp_order = LimitOrder(exit_action, abs(int(qty)), tp_price)
+    sl_order = StopOrder(exit_action, abs(int(qty)), sl_price)
 
     br = BracketOrder(parent, tp_order, sl_order)
 
     # ----------------------------------------------------
+    # SUBMIT + FINAL STATES
+    # ----------------------------------------------------
     bracket_lines = []
-    bracket_lines.append(f"BRACKET SUBMIT: {contract.localSymbol} dir={'SELL' if direction < 0 else 'BUY'} qty={qty}")
+    bracket_lines.append(f"BRACKET SUBMIT: {contract.localSymbol} dir={action} qty={qty}")
     bracket_lines.append("-" * 40)
+
     trades = []
-    
-    # 1) Submit whole bracket first
+
     for o in br:
         try:
             trade = ib.placeOrder(contract, o)
@@ -862,26 +865,24 @@ def open_position_with_brackets(
         except Exception as e:
             bracket_lines.append(f"SUBMIT_FAIL: {e}")
             break
-    
-    # 2) Only NOW wait for ALL socket messages
+
     ib.sleep(0.5)
     ib.waitOnUpdate(timeout=2)
-    
-    # 3) Now log FINAL, ACCURATE statuses
-    for trade in trades:
-        st = trade.orderStatus
+
+    for t in trades:
+        st = t.orderStatus
         bracket_lines.append(
-            f"FINAL: orderId={trade.order.orderId} "
-            f"type={trade.order.orderType} action={trade.order.action} "
-            f"status={st.status} filled={st.filled} remaining={st.remaining}"
+            f"FINAL: orderId={t.order.orderId} type={t.order.orderType} "
+            f"action={t.order.action} status={st.status} "
+            f"filled={st.filled} remaining={st.remaining}"
         )
-    
-    # 4) Positions and trades after
+
     bracket_lines.append("-" * 40)
     bracket_lines.append(f"PositionsAfter: {len(ib.positions())}")
     bracket_lines.append(f"TradesAfter:    {len(ib.openTrades())}")
-    
+
     log_step(acct, "\n".join(bracket_lines))
+
 
 
 
@@ -1167,7 +1168,8 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     take_profit=tp_price,
                     stop_loss=sl_price,
                     target_percentage=None,
-                    acct=acc.account_number
+                    acct=acc.account_number,
+                    tp_sl_are_multipliers=False
                 )
 
                 time.sleep(1)
