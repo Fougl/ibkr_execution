@@ -730,6 +730,14 @@ def current_position_qty(ib: IB, contract: Contract) -> int:
 def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
     action = "SELL" if qty > 0 else "BUY"
     log_step(acct, f"CLOSE_POSITION: sending {action} {abs(qty)}")
+    log_step(acct,
+        f"CLOSE_DEBUG: secType={getattr(contract,'secType',None)} "
+        f"symbol={getattr(contract,'symbol',None)} "
+        f"localSymbol={getattr(contract,'localSymbol',None)} "
+        f"exchange={getattr(contract,'exchange',None)!r} "
+        f"conId={getattr(contract,'conId',None)} "
+        f"ltm={getattr(contract,'lastTradeDateOrContractMonth',None)!r}"
+    )
 
     try:
         order = MarketOrder(action, abs(int(qty)))
