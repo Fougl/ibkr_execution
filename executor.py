@@ -977,7 +977,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     if q == 0:
                         continue
                     log_step(acc.account_number, f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
-                    close_position(ib, p.contract, q)
+                    close_position(ib, p.contract, q, acc.account_number)
 
             #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
@@ -1300,7 +1300,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 return result
 
             # Close existing position
-            close_position(ib, contract, qty)
+            close_position(ib, contract, qty, acc.account_number)
             time.sleep(1)
 
             # Retry logic
@@ -1340,7 +1340,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step(acc.account_number, f"[EXEC] Opposite direction singal: Closing position and opening new one.")
-            close_position(ib, contract, qty)
+            close_position(ib, contract, qty, acc.account_number)
             time.sleep(1)
 
             # Retry close
