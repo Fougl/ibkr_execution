@@ -1239,7 +1239,9 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             log_step(acc.account_number, "Current position for symbol: No opened positions")
         
         try:
-            trades = list(ib.trades())   # <-- FIXED (cached, 0 blocking)
+            ib.reqIds()                 # <-- FIX
+            ib.waitOnUpdate(timeout=1)
+            trades = list(ib.openTrades())   # <-- FIXED (cached, 0 blocking)
         except:
             trades = []
         
