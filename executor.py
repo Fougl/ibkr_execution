@@ -1238,15 +1238,8 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         else:
             log_step(acc.account_number, "Current position for symbol: No opened positions")
         
-        
         try:
-            ib.reqOpenOrders()
-            ib.waitOnUpdate(timeout=1)
-        except:
-            pass
-        try:
-            trades = ib.openTrades()
-            #ib.waitOnUpdate(timeout=1)
+            trades = list(ib.trades())   # <-- FIXED (cached, 0 blocking)
         except:
             trades = []
         
@@ -1288,7 +1281,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             for key, lst in grouped.items():
                 blocks.append(f"[CONTRACT {key}]\n  " + "\n  ".join(lst))
         
-            log_step(acc.account_number, 
+            log_step(acc.account_number,
                      "Open orders for symbol:\n" + "\n\n".join(blocks))
         
         else:
