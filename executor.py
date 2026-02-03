@@ -921,8 +921,8 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                       .get(str(acc.account_number), {})
                       .get("done", False)
                 )
-            if already:
-                continue
+            # if already:
+            #     continue
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
             pos = ib.positions()
