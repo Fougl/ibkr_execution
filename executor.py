@@ -1253,7 +1253,6 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 continue
         
         if filtered:
-            #log_step(acc.account_number, f"{len(filtered)}")
             log_step(acc.account_number, "Open orders for symbol:")
             for t in filtered:
                 try:
@@ -1263,13 +1262,15 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
                     log_step(
                         acc.account_number,
+                        "  " + " ".join([
                             f"type={getattr(o,'orderType',None)}",
                             f"action={getattr(o,'action',None)}",
                             f"qty={getattr(o,'totalQuantity',None)}"
-                        
+                        ])
                     )
-                except:
-                    continue
+                except Exception as e:
+                    log_step(acc.account_number, f"ERROR printing open order: {e}")
+                    raise
         else:
             log_step(acc.account_number, "Open orders for symbol: NONE")
         
