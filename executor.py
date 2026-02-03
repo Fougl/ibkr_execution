@@ -178,16 +178,16 @@ def flush_account_log(acct: int, header: str):
             return
 
         msg = (
-            f"[=== {header} acct={acct} ===]\n" +
-            "\n".join(" " + ln for ln in lines)
+            f"[=== {header} acct={acct} BEGIN ===]\n"   # HEADER LINE
+            "\n"                                       # <-- REQUIRED BLANK LINE
+            + "\n".join(" " + ln for ln in lines)      # BODY INDENTED (so CW hides it)
         )
+        logger.info(msg)
 
         logger.info(msg)
 
     finally:
         _account_logs[acct] = []
-
-
 
 
 
