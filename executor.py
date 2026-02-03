@@ -680,39 +680,34 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     return ib
 
 
-def cancel_all_open_orders(ib: IB, reason: str, acct: int, symbol: str) -> int:
-    """
-    Cancels ONLY open orders for the given symbol.
-    Returns number of cancel attempts.
-    """
+def cancel_orders_for_contract(ib: IB, reason: str, acct: int, contract: Contract) -> int:
     attempts = 0
+    target_conId = int(contract.conId)
 
-    # Request updated open orders/trades from IB
+    # Request *this client's* open orders (safe)
     try:
-        ib.reqAllOpenOrders()
-        ib.waitOnUpdate(timeout=2)
+        ib.reqOpenOrders()
+        ib.sleep(0.2)
     except Exception as e:
-        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqAllOpenOrders err={e}")
+        log_step(acct, f"CANCEL_ORDERS_FAIL: reqOpenOrders err={e}")
 
-    # openTrades() gives contract + order
     trades = list(ib.openTrades())
+    orders_to_cancel = []
 
-    # Filter only this symbol
-    orders_for_symbol = []
     for t in trades:
         c = t.contract
         o = t.order
-        if getattr(c, "localSymbol", c.symbol) == symbol:
-            orders_for_symbol.append(o)
+        if int(getattr(c, "conId", -1)) == target_conId:
+            orders_to_cancel.append(o)
 
-    if not orders_for_symbol:
-        log_step(acct, "CANCEL_ORDERS: none_for_symbol")
+    if not orders_to_cancel:
+        log_step(acct, f"CANCEL_ORDERS: none_for_symbol {contract.localSymbol}")
         return 0
 
-    log_step(acct, f"CANCEL_ORDERS: found {len(orders_for_symbol)} for {symbol}")
+    log_step(acct, f"CANCEL_ORDERS: found {len(orders_to_cancel)} for {contract.localSymbol}")
 
-    for o in orders_for_symbol:
-        oid = getattr(o, "orderId", None)
+    for o in orders_to_cancel:
+        oid = o.orderId
         try:
             ib.cancelOrder(o)
             attempts += 1
@@ -721,14 +716,15 @@ def cancel_all_open_orders(ib: IB, reason: str, acct: int, symbol: str) -> int:
             log_step(
                 acct,
                 f"CANCEL_ORDER: type={o.orderType} orderId={oid} "
-                f"reason={reason} lmt={getattr(o,'lmtPrice',None)} "
-                f"stp={getattr(o,'auxPrice',None)}"
+                f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)} "
+                f"reason={reason}"
             )
         except Exception as e:
-            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} reason={reason} err={e}")
+            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} err={e}")
 
     log_step(acct, f"CANCEL_ORDERS_DONE: total_attempts={attempts}")
     return attempts
+
 
 
 
