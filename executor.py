@@ -1572,7 +1572,7 @@ def health() -> Any:
 
 @app.post("/webhook")
 def webhook() -> Any:
-    logger.info("===[HTTP] /webhook received")
+    logger.info("===HTTP /webhook received")
     try:
         payload = request.get_json(force=True, silent=False) or {}
     except Exception:
