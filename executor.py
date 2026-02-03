@@ -836,34 +836,42 @@ def open_position_with_brackets(
     br = BracketOrder(parent, tp_order, sl_order)
 
     # ----------------------------------------------------
-    # Submit orders
-    # ----------------------------------------------------
+    bracket_lines = []
+    bracket_lines.append(f"BRACKET SUBMIT: {contract.localSymbol} dir={'SELL' if direction < 0 else 'BUY'} qty={qty}")
+    bracket_lines.append("-" * 40)
+    trades = []
+    
+    # 1) Submit whole bracket first
     for o in br:
         try:
-            trade=ib.placeOrder(contract, o)
-            log_step(
-                acct,
-                f"BRACKET_ORDER: {o.orderType} {o.action} qty={o.totalQuantity} "
-                #f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)}"
-            )
-            #ib.sleep(0.2)  # let callbacks arrive
-            ib.waitOnUpdate(timeout=1)
-            st = trade.orderStatus
-            log_step(
-                acct,
-                f"ORDER_STATUS: "
-                f"status={st.status} filled={st.filled} remaining={st.remaining} "
-                f"avgFill={st.avgFillPrice}"
-                f"lastError={trade.log[-1].message if trade.log else ''}"
+            trade = ib.placeOrder(contract, o)
+            trades.append(trade)
+            bracket_lines.append(
+                f"SUBMIT: {o.orderType} {o.action} qty={o.totalQuantity}"
             )
         except Exception as e:
-            log_step(acct, f"BRACKET_ORDER_FAIL: err={e}")
-            return
+            bracket_lines.append(f"SUBMIT_FAIL: {e}")
+            break
+    
+    # 2) Only NOW wait for ALL socket messages
     ib.sleep(0.5)
-    log_step(acct, f"OPEN_POSITIONS_AFTER: {len(ib.positions())}")
-    log_step(acct, f"OPEN_TRADES_AFTER: {len(ib.openTrades())}")
-
-    #log_step(acct, "BRACKET_ORDER_DONE")
+    ib.waitOnUpdate(timeout=2)
+    
+    # 3) Now log FINAL, ACCURATE statuses
+    for trade in trades:
+        st = trade.orderStatus
+        bracket_lines.append(
+            f"FINAL: orderId={trade.order.orderId} "
+            f"type={trade.order.orderType} action={trade.order.action} "
+            f"status={st.status} filled={st.filled} remaining={st.remaining}"
+        )
+    
+    # 4) Positions and trades after
+    bracket_lines.append("-" * 40)
+    bracket_lines.append(f"PositionsAfter: {len(ib.positions())}")
+    bracket_lines.append(f"TradesAfter:    {len(ib.openTrades())}")
+    
+    log_step(acct, "\n".join(bracket_lines))
 
 
 
