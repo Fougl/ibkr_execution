@@ -178,12 +178,9 @@ def flush_account_log(acct: int, header: str):
             return
 
         msg = (
-            f"[=== {header} acct={acct} BEGIN ===]\n"   # HEADER LINE
-            "\n"                                       # <-- REQUIRED BLANK LINE
+            f"[=== {header} acct={acct} BEGIN ===]\n"   # HEADER LINE                                     # <-- REQUIRED BLANK LINE
             + "\n".join(" " + ln for ln in lines)      # BODY INDENTED (so CW hides it)
         )
-        logger.info(msg)
-
         logger.info(msg)
 
     finally:
@@ -1353,6 +1350,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step(acc.account_number, f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(ib, contract, qty, acc.account_number)
+            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number, contract=contract)
             time.sleep(1)
 
             # Retry close
@@ -1396,7 +1394,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
-            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number, contract=contract)
+            #cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number, contract=contract)
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
