@@ -178,7 +178,7 @@ def flush_account_log(acct: int, header: str):
             return
 
         msg = "\n".join([
-            f"[EXEC {header} acct={acct}]",          # CLEAN SHORT TITLE
+            f"[=== {header} acct={acct}]",          # CLEAN SHORT TITLE
             *("  " + ln for ln in lines),            # INDENTED BODY (expands nicely)
         ])
 
