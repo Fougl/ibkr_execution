@@ -965,7 +965,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     except Exception:
                         continue
                 
-                cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number)
+                cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number, symbol=acc.symbol)
 
             
             if not pos:
@@ -1396,7 +1396,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
-            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number)
+            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number, symbol=acc.symbol)
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
@@ -1455,7 +1455,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number)
+            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number, symbol=acc.symbol)
             open_position_with_brackets(
                 ib,
                 contract,
