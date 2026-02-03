@@ -720,6 +720,54 @@ def cancel_all_open_orders(ib: IB, reason: str, acct: int) -> int:
     return attempts
 
 
+def cancel_all_open_orders_by_contract(ib: IB, reason: str, acct: int, contract: Contract) -> int:
+    """
+    Cancels only open orders for THIS contract (symbol).
+    Same logic as original, but filtered.
+    """
+    attempts = 0
+
+    # Update open orders from IB
+    try:
+        ib.reqOpenOrders()
+        ib.waitOnUpdate(timeout=2)
+    except Exception as e:
+        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
+
+    try:
+        orders = list(ib.openOrders())
+    except Exception as e:
+        log_step(acct, f"CANCEL_ORDERS_FAIL: error fetching openOrders err={e}")
+        orders = []
+
+    if not orders:
+        log_step(acct, "CANCEL_ORDERS: none_found")
+        return 0
+
+    # NEW: Filter only this symbol
+    target = getattr(contract, "localSymbol", contract.symbol)
+    orders = [o for o in orders if getattr(o.contract, "localSymbol", o.contract.symbol) == target]
+
+    if not orders:
+        log_step(acct, f"CANCEL_ORDERS: none_for_symbol {target}")
+        return 0
+
+    log_step(acct, f"CANCEL_ORDERS: found {len(orders)} for {target}")
+
+    for o in orders:
+        oid = getattr(o, "orderId", None)
+        try:
+            ib.cancelOrder(o)
+            attempts += 1
+            ib.sleep(0.2)
+            log_step(acct, f"CANCEL_ORDER: type={o.orderType} orderId={oid} reason={reason}")
+        except Exception as e:
+            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} reason={reason} err={e}")
+
+    log_step(acct, f"CANCEL_ORDERS_DONE: total_attempts={attempts}")
+    return attempts
+
+
 
 
 def current_position_qty(ib: IB, contract: Contract) -> int:
@@ -1384,7 +1432,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
-            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number)
+            cancel_all_open_orders_by_contract(ib, reason="before_reversal_entry", acct=acc.account_number, contract=contract)
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
@@ -1443,7 +1491,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number)
+            cancel_all_open_orders_by_contract(ib, reason="before_new_entry", acct=acc.account_number, contract=contract)
             open_position_with_brackets(
                 ib,
                 contract,
