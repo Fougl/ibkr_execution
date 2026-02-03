@@ -1295,7 +1295,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 time.sleep(1)
 
                 result.update({"ok": False, "action": "exit_failed_after_retry"})
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
@@ -1408,7 +1408,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                     "action": "entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
@@ -1448,7 +1448,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             ib.disconnect()
             flush_account_log(acc.account_number, "WEBHOOK_EXEC")
             return result
