@@ -179,8 +179,8 @@ def flush_account_log(acct: int, header: str):
 
         msg = "\n".join([
             f"=== {header} acct={acct} BEGIN ===",
-            *lines,
-            f"=== {header} END ==="
+            *lines
+            #f"=== {header} END ==="
         ])
 
         logger.info(msg)
@@ -1384,7 +1384,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 acc.account_number    # <<< NEW
             )
 
-            logger.info(f"[EXEC] Entry order submitted acct={acc.account_number} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
+            #logger.info(f"[EXEC] Entry order submitted acct={acc.account_number} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
                 "ok": True,
@@ -1476,7 +1476,7 @@ def background_scheduler_loop():
       - Runs ensure_postopen_reopen_if_needed() once per market day
       - Automatically detects new market day by comparing open_dt dates
     """
-    logger.info("Background scheduler thread started.")
+    #logger.info("Background scheduler thread started.")
 
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
@@ -1572,7 +1572,7 @@ def health() -> Any:
 
 @app.post("/webhook")
 def webhook() -> Any:
-    logger.info("[HTTP] /webhook received")
+    logger.info("===[HTTP] /webhook received")
     try:
         payload = request.get_json(force=True, silent=False) or {}
     except Exception:
@@ -1581,7 +1581,7 @@ def webhook() -> Any:
     try:
         settings = settings_cache.get()
         sig = parse_signal(payload)
-        logger.info(f"[HTTP] Parsed payload alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty}")
+        logger.info(f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
         # Per your requirement: ONLY do things when JSON arrives:
         # 1) list secrets
@@ -1608,7 +1608,7 @@ def webhook() -> Any:
         results: List[Dict[str, Any]] = []
         max_workers = min(MAX_PARALLEL_ACCOUNTS, max(1, len(accounts)))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            logger.info(f"[HTTP] Executing signal across accounts in parallel workers={max_workers}")
+            #logger.info(f"[HTTP] Executing signal across accounts in parallel workers={max_workers}")
             futs = [pool.submit(execute_signal_for_account, acc, sig, settings) for acc in accounts]
             for f in as_completed(futs):
                 results.append(f.result())
@@ -1616,11 +1616,11 @@ def webhook() -> Any:
         ok_all = all(r.get("ok") is True for r in results)
         any_failed = any(r.get("ok") is False for r in results)
 
-        logger.info(f"Webhook done symbol={sig.symbol} alert={sig.raw_alert} ok_all={ok_all} results={results}")
+        #logger.info(f"Webhook done symbol={sig.symbol} alert={sig.raw_alert} ok_all={ok_all} results={results}")
 
         # If any failed, return 503 so Lambda can retry if you want
         status = 200 if not any_failed else 503
-        logger.info(f"[HTTP] Response status={status} ok_all={ok_all} any_failed={any_failed}")
+        ##logger.info(f"[HTTP] Response status={status} ok_all={ok_all} any_failed={any_failed}")
         return jsonify({"ok": ok_all, "results": sorted(results, key=lambda r: r.get("account_number", 0))}), status
 
     except Exception as e:
@@ -1632,5 +1632,5 @@ def webhook() -> Any:
 
 # When running executor.py directly (not via waitress)
 if __name__ == "__main__":
-    logger.info("Executor initialized (direct run). Waitress not used here.")
+    logger.info("===STARTING: Executor initialized")
     ##start_scheduler()
