@@ -1240,7 +1240,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
         try:
             trades = ib.openTrades()
-            log_step(acc.account_number, f"{len(trades)}")
+            
         except:
             trades = []
         
@@ -1253,6 +1253,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 continue
         
         if filtered:
+            log_step(acc.account_number, f"{len(filtered)}")
             log_step(acc.account_number, "Open orders for symbol:")
             for t in filtered:
                 try:
