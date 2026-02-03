@@ -1240,7 +1240,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
         try:
             trades = ib.openTrades()
-            log_step(acc.account_number, "{len(trades}")
+            log_step(acc.account_number, f"{len(trades}")
         except:
             trades = []
         
