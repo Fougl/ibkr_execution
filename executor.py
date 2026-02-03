@@ -690,7 +690,8 @@ def cancel_all_open_orders(ib: IB, reason: str, acct: int) -> int:
     # Update open orders from IB
     try:
         ib.reqOpenOrders()
-        ib.waitOnUpdate(timeout=2)
+        ib.sleep(0.2)
+        #ib.waitOnUpdate(timeout=2)
     except Exception as e:
         log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
 
@@ -730,7 +731,8 @@ def cancel_all_open_orders_by_contract(ib: IB, reason: str, acct: int, contract:
     # Update open orders from IB
     try:
         ib.reqOpenOrders()
-        ib.waitOnUpdate(timeout=2)
+        ib.sleep(0.2)
+        #ib.waitOnUpdate(timeout=2)
     except Exception as e:
         log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
 
@@ -969,7 +971,8 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
             # Snapshot + cancel open orders (TP/SL etc.)
             try:
                 ib.reqOpenOrders()
-                ib.waitOnUpdate(timeout=2)
+                ib.sleep(0.2)
+                #ib.waitOnUpdate(timeout=2)
             except Exception:
                 pass
             
@@ -1291,7 +1294,8 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # Always list all open orders for this account (no filtering)
         try:
             ib.reqOpenOrders()
-            ib.waitOnUpdate(timeout=1)
+            ib.sleep(0.2)
+            #ib.waitOnUpdate(timeout=1)
             open_orders = ib.openOrders()
         except:
             open_orders = []
