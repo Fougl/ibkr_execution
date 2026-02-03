@@ -728,9 +728,8 @@ def current_position_qty(ib: IB, contract: Contract) -> int:
 
 
 def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
-
     action = "SELL" if qty > 0 else "BUY"
-    #log_step(acct, f"CLOSE_POSITION: sending {action} {abs(qty)}")
+    log_step(acct, f"CLOSE_POSITION: sending {action} {abs(qty)}")
 
     try:
         order = MarketOrder(action, abs(int(qty)))
@@ -739,19 +738,22 @@ def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
         log_step(acct, f"CLOSE_POSITION_FAIL: error={e}")
         return
 
-    # Give IB a chance to update
-    #time.sleep(1)
-    ib.waitOnUpdate(timeout=1)
-    #ib.sleep(0.2)
-    #time.sleep(0.2)
+    # More robust wait loop: IB updates positions asynchronously
+    for i in range(15):      # ~15 seconds worst-case
+        ib.waitOnUpdate(timeout=1.0)   # consume API messages
+        time.sleep(0.2)
 
-    # Check if it actually closed
-    remaining = current_position_qty(ib, contract)
+        # Force refresh from IB — important!
+        ib.reqPositions()
+        ib.waitOnUpdate(timeout=0.5)
 
-    if remaining == 0:
-        log_step(acct, "CLOSE_POSITION_SUCCESS")
-    else:
-        log_step(acct, f"CLOSE_POSITION_FAIL: still_open={remaining}")
+        remaining = current_position_qty(ib, contract)
+        if remaining == 0:
+            log_step(acct, f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
+            return
+
+    log_step(acct, f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
+
 
 
 
@@ -1161,6 +1163,16 @@ def parse_timestamp(value) -> float | None:
         return None
 
 
+def ib_connect_retry(host, port, client_id, attempts=3, delay=1):
+    for i in range(attempts):
+        try:
+            return ib_connect(host, port, client_id)
+        except Exception as e:
+            if i < attempts - 1:
+                time.sleep(delay)
+                continue
+            raise
+
 # ---------------------------
 # Per-account signal execution
 # ---------------------------
@@ -1191,7 +1203,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
     try:
         try:
-            ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
+            ib = ib_connect_retry(IB_HOST, acc.api_port, acc.client_id, attempts=3, delay=1)
         except Exception as e:
             # LOG PER ACCOUNT (your new unified log)
             log_step(acc.account_number, "IB_CONNECT_FAIL port")
