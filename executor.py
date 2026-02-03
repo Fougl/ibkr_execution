@@ -1002,6 +1002,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                             "currency": getattr(c, "currency", ""),
                             "lastTradeDateOrContractMonth": getattr(c, "lastTradeDateOrContractMonth", ""),
                             "position": int(p.position),
+                            "conId": getattr(c, "conId", None),    # <-- THIS IS THE FIX
                         }
 
                 # =======================================================
@@ -1067,7 +1068,6 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
 def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    
 
     dayk = state_key_for_day(now_local.date())
 
@@ -1078,6 +1078,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 st = load_state()
                 entry = st.get("preclose", {}).get(dayk, {}).get(str(acc.account_number))
 
+            # must have preclose + not already reopened
             if not entry or not entry.get("done"):
                 continue
             if entry.get("reopen_done"):
@@ -1088,14 +1089,14 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
 
-            # Only reopen if currently flat for this account
+            # must be flat right now
             any_open = any(int(p.position) != 0 for p in ib.positions())
             if any_open:
                 log_step(acc.account_number, f"Postopen: acct={acc.account_number} not flat; will not reopen.")
-                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
 
+            # no snapshot → mark done
             if not snapshot:
                 with _state_lock:
                     st = load_state()
@@ -1103,90 +1104,96 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                     st["preclose"][dayk][str(acc.account_number)]["reopen_at"] = now_local.isoformat()
                     save_state(st)
                 log_step(acc.account_number, f"Postopen: acct={acc.account_number} nothing to reopen (empty snapshot).")
-                #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
                 ib.disconnect()
                 continue
 
-            for _, meta in snapshot.items():
-                if meta.get("secType") != "FUT":
+            # =====================================================
+            # MAIN LOOP — rebuild original contracts using conId
+            # =====================================================
+            for conId_key, meta in snapshot.items():
+
+                # conId is stored as dict key
+                try:
+                    conId = int(conId_key)
+                except:
+                    log_step(acc.account_number, f"[POSTOPEN] Invalid conId key={conId_key}, skipping.")
                     continue
-            
-                # rebuild contract
-                c = Future(
-                    symbol=meta.get("symbol", ""),
-                    lastTradeDateOrContractMonth=meta.get("lastTradeDateOrContractMonth", ""),
-                    exchange=meta.get("exchange", ""),
-                    currency=meta.get("currency", "USD"),
-                    localSymbol=meta.get("localSymbol", None),
-                )
-            
+
+                # Build by conId (BEST POSSIBLE METHOD)
+                c = Contract()
+                c.conId = conId
+
+                try:
+                    qc = ib.qualifyContracts(c)
+                    if qc:
+                        c = qc[0]   # fully qualified contract
+                except Exception as e:
+                    log_step(acc.account_number, f"[POSTOPEN] qualify failed conId={conId}: {e}")
+
                 direction = +1 if int(meta.get("position", 0)) > 0 else -1
                 qty = abs(int(meta.get("position", 0)))
-            
+
                 # ------------------------------
-                # Extract TP/SL from orders_snapshot
+                # Match TP/SL from snapshot
                 # ------------------------------
                 tp_price = None
                 sl_price = None
-            
+
                 for om in orders_snapshot:
-                    # Only match orders for THIS contract (conId is safest)
-                    if om.get("conId") != getattr(c, "conId", None):
+                    if om.get("conId") != conId:
                         continue
-            
+
                     ot = om.get("orderType")
                     lmt = om.get("lmtPrice")
                     aux = om.get("auxPrice")
-            
+
                     if ot == "LMT" and lmt is not None:
                         tp_price = float(lmt)
-            
                     if ot == "STP" and aux is not None:
                         sl_price = float(aux)
-            
-                log_step(acc.account_number, 
+
+                log_step(
+                    acc.account_number,
                     f"[POSTOPEN] Reopening with bracket acct={acc.account_number} "
-                    f"symbol={c.symbol} dir={direction} qty={qty} "
+                    f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
                     f"tp={tp_price} sl={sl_price}"
                 )
-            
-                # If both exist → use bracket
-                # if tp_price is not None and sl_price is not None:
+
                 open_position_with_brackets(
                     ib,
                     c,
                     direction,
                     qty,
-                    take_profit = tp_price,       # because your bracket fn expects multipliers? NO — prices: pass raw prices
-                    stop_loss  = sl_price,
-                    target_percentage = None,
-                    acct=acc.account_number 
+                    take_profit=tp_price,
+                    stop_loss=sl_price,
+                    target_percentage=None,
+                    acct=acc.account_number
                 )
 
-            
-            
                 time.sleep(1)
-
-
-            
-
-
-
-            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
 
             ib.disconnect()
 
+            # Mark reopen done
             with _state_lock:
                 st = load_state()
                 st["preclose"][dayk][str(acc.account_number)]["reopen_done"] = True
                 st["preclose"][dayk][str(acc.account_number)]["reopen_at"] = now_local.isoformat()
                 save_state(st)
 
-            #logger.info(f"Postopen: acct={acc.account_number} completed reopen cycle.")
         except Exception as e:
+            ib.disconnect()
             log_step(acc.account_number, f"Postopen error acct={acc.account_number}: {e}")
         finally:
+            try:
+                ib.disconnect()
+            except:
+                pass
+        
+            # Give IB time to release clientID to avoid "clientId already in use"
+            time.sleep(1.2)
             flush_account_log(acc.account_number, "POSTOPEN_EXEC")
+
 
 
 def parse_timestamp(value) -> float | None:
