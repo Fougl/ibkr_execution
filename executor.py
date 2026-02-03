@@ -795,39 +795,39 @@ def open_position_with_brackets(
     # ----------------------------------------------------
     # Reference price (marketPrice or last)
     # ----------------------------------------------------
-    ticker = ib.reqMktData(contract, "", False, False)
-    t0 = time.time()
-    fill_price = 0.0
+    # ticker = ib.reqMktData(contract, "", False, False)
+    # t0 = time.time()
+    # fill_price = 0.0
 
-    while time.time() - t0 < 5:
-        ib.waitOnUpdate(timeout=1)
-        mp = ticker.marketPrice()
-        if mp and mp > 0:
-            fill_price = float(mp)
-            break
-        last = getattr(ticker, "last", 0) or 0
-        if last and last > 0:
-            fill_price = float(last)
-            break
+    # while time.time() - t0 < 5:
+    #     ib.waitOnUpdate(timeout=1)
+    #     mp = ticker.marketPrice()
+    #     if mp and mp > 0:
+    #         fill_price = float(mp)
+    #         break
+    #     last = getattr(ticker, "last", 0) or 0
+    #     if last and last > 0:
+    #         fill_price = float(last)
+    #         break
 
-    ib.cancelMktData(contract)
+    # ib.cancelMktData(contract)
 
-    log_step(acct, f"ENTRY_FILL_PRICE: {fill_price}")
+    # log_step(acct, f"ENTRY_FILL_PRICE: {fill_price}")
 
-    if fill_price <= 0:
-        log_step(acct, "ENTRY_PRICE_FAIL: no market/last price → skip TP/SL")
-        return
+    # if fill_price <= 0:
+    #     log_step(acct, "ENTRY_PRICE_FAIL: no market/last price → skip TP/SL")
+    #     return
 
     # ----------------------------------------------------
     # Compute TP/SL prices
     # ----------------------------------------------------
     try:
-        tp_price = fill_price * float(abs(fill_price) * take_profit)
+        tp_price = 7020 * float(take_profit)
     except Exception:
         tp_price = None
 
     try:
-        sl_price = fill_price * float(stop_loss)
+        sl_price = 7020 * float(stop_loss)
     except Exception:
         sl_price = None
 
