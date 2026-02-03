@@ -177,15 +177,16 @@ def flush_account_log(acct: int, header: str):
         if not lines:
             return
 
-        msg = "\n".join([
-            f"[=== {header} acct={acct}]",          # CLEAN SHORT TITLE
-            *("  " + ln for ln in lines),            # INDENTED BODY (expands nicely)
-        ])
+        msg = (
+            f"[=== {header} acct={acct} ===]\n" +
+            "\n".join(" " + ln for ln in lines)
+        )
 
         logger.info(msg)
 
     finally:
         _account_logs[acct] = []
+
 
 
 
