@@ -1240,6 +1240,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
         try:
             trades = ib.openTrades()
+            ib.waitOnUpdate(timeout=1)
         except:
             trades = []
         
