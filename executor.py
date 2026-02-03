@@ -680,52 +680,44 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     return ib
 
 
-def cancel_orders_for_contract(ib: IB, reason: str, acct: int, contract: Contract) -> int:
+def cancel_all_open_orders(ib: IB, reason: str, acct: int) -> int:
+    """
+    Cancels ALL open orders for this account (IB client).
+    Returns number of cancel attempts.
+    """
     attempts = 0
-    target_conId = int(contract.conId)
 
-    # Request *this client's* open orders (safe)
+    # Update open orders from IB
     try:
         ib.reqOpenOrders()
-        ib.sleep(0.2)
+        ib.waitOnUpdate(timeout=2)
     except Exception as e:
-        log_step(acct, f"CANCEL_ORDERS_FAIL: reqOpenOrders err={e}")
+        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
 
-    trades = list(ib.openTrades())
-    orders_to_cancel = []
+    try:
+        orders = list(ib.openOrders())
+    except Exception as e:
+        log_step(acct, f"CANCEL_ORDERS_FAIL: error fetching openOrders err={e}")
+        orders = []
 
-    for t in trades:
-        c = t.contract
-        o = t.order
-        if int(getattr(c, "conId", -1)) == target_conId:
-            orders_to_cancel.append(o)
-
-    if not orders_to_cancel:
-        log_step(acct, f"CANCEL_ORDERS: none_for_symbol {contract.localSymbol}")
+    if not orders:
+        log_step(acct, "CANCEL_ORDERS: none_found")
         return 0
 
-    log_step(acct, f"CANCEL_ORDERS: found {len(orders_to_cancel)} for {contract.localSymbol}")
+    log_step(acct, f"CANCEL_ORDERS: found {len(orders)}")
 
-    for o in orders_to_cancel:
-        oid = o.orderId
+    for o in orders:
+        oid = getattr(o, "orderId", None)
         try:
             ib.cancelOrder(o)
             attempts += 1
             ib.sleep(0.2)
-
-            log_step(
-                acct,
-                f"CANCEL_ORDER: type={o.orderType} orderId={oid} "
-                f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)} "
-                f"reason={reason}"
-            )
+            log_step(acct, f"CANCEL_ORDER: type={o.orderType} orderId={oid} reason={reason}")
         except Exception as e:
-            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} err={e}")
+            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} reason={reason} err={e}")
 
     log_step(acct, f"CANCEL_ORDERS_DONE: total_attempts={attempts}")
     return attempts
-
-
 
 
 
@@ -961,7 +953,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     except Exception:
                         continue
                 
-                cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number, symbol=acc.symbol)
+                cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number)
 
             
             if not pos:
@@ -1392,7 +1384,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
-            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number, symbol=acc.symbol)
+            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number)
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
@@ -1451,7 +1443,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number, symbol=acc.symbol)
+            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number)
             open_position_with_brackets(
                 ib,
                 contract,
