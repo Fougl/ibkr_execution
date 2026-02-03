@@ -680,44 +680,36 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     return ib
 
 
-def cancel_all_open_orders(ib: IB, reason: str, acct: int) -> int:
-    """
-    Cancels ALL open orders for this account (IB client).
-    Returns number of cancel attempts.
-    """
-    attempts = 0
-
-    # Update open orders from IB
-    try:
-        ib.reqOpenOrders()
-        ib.waitOnUpdate(timeout=2)
-    except Exception as e:
-        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
+def cancel_all_open_orders(ib, reason="", acct=None, symbol=None, contract=None):
+    log_step(acct, f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
-        orders = list(ib.openOrders())
-    except Exception as e:
-        log_step(acct, f"CANCEL_ORDERS_FAIL: error fetching openOrders err={e}")
-        orders = []
+        trades = ib.openTrades()
+    except:
+        trades = []
 
-    if not orders:
-        log_step(acct, "CANCEL_ORDERS: none_found")
-        return 0
+    if not trades:
+        log_step(acct, "CANCEL_OPEN_ORDERS: NONE")
+        return
 
-    log_step(acct, f"CANCEL_ORDERS: found {len(orders)}")
-
-    for o in orders:
-        oid = getattr(o, "orderId", None)
+    for t in trades:
         try:
-            ib.cancelOrder(o)
-            attempts += 1
-            ib.sleep(0.2)
-            log_step(acct, f"CANCEL_ORDER: type={o.orderType} orderId={oid} reason={reason}")
-        except Exception as e:
-            log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} reason={reason} err={e}")
+            o = t.order
+            c = t.contract
 
-    log_step(acct, f"CANCEL_ORDERS_DONE: total_attempts={attempts}")
-    return attempts
+            if contract is not None:
+                if getattr(c, "conId", None) != getattr(contract, "conId", None):
+                    continue
+            elif symbol is not None:
+                if getattr(c, "localSymbol", None) != symbol and getattr(c, "symbol", None) != symbol:
+                    continue
+
+            ib.cancelOrder(o)
+
+        except:
+            continue
+
+    log_step(acct, "CANCEL_OPEN_ORDERS: DONE")
 
 
 
@@ -1384,7 +1376,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 flush_account_log(acc.account_number, "WEBHOOK_EXEC")
                 return result
             
-            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number)
+            cancel_all_open_orders(ib, reason="before_reversal_entry", acct=acc.account_number, contract=contract)
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
@@ -1443,7 +1435,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number)
+            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number, contract=contract)
             open_position_with_brackets(
                 ib,
                 contract,
