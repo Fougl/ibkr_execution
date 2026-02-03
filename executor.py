@@ -894,8 +894,6 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
 # ---------------------------
 def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSpec]) -> None:
     now_local = now_in_market_tz(settings)
-    #logger.info("Preclose potential position closing")
-
 
     dayk = state_key_for_day(now_local.date())
 
@@ -904,85 +902,111 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
         st.setdefault("preclose", {})
         st["preclose"].setdefault(dayk, {})
 
-    # Close each account independently; sequential is fine here (only 1x/day).
     for acc in accounts:
         log_step(acc.account_number, "Preclose potential position closing")
         try:
             with _state_lock:
                 st = load_state()
-                already = bool(st.get("preclose", {}).get(dayk, {}).get(str(acc.account_number), {}).get("done", False))
+                already = bool(
+                    st.get("preclose", {})
+                      .get(dayk, {})
+                      .get(str(acc.account_number), {})
+                      .get("done", False)
+                )
             if already:
                 continue
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
-            #logger.info(f"[EXEC] IB connected acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
             pos = ib.positions()
-            
-            # Snapshot + cancel open orders (TP/SL etc.)
-            try:
-                ib.reqOpenOrders()
-                ib.waitOnUpdate(timeout=2)
-            except Exception:
-                pass
-            
-            open_orders = list(ib.openOrders())
-            if not open_orders:
+
+            #
+            # --- SNAPSHOT OPEN TRADES INSTEAD OF OPEN ORDERS ---
+            #
+
+            # try:
+            #     ib.reqOpenOrders()
+            #     ib.waitOnUpdate(timeout=2)
+            # except Exception:
+            #     pass
+
+            trades = list(ib.openTrades())
+            orders_snapshot: List[Dict[str, Any]] = []
+
+            if not trades:
                 log_step(acc.account_number, "No open orders to cancel")
             else:
-                orders_snapshot: List[Dict[str, Any]] = []
-                for o in open_orders:
-                    try:
-                        orders_snapshot.append({
-                            "orderId": getattr(o, "orderId", None),
-                            "action": getattr(o, "action", None),
-                            "totalQuantity": getattr(o, "totalQuantity", None),
-                            "orderType": getattr(o, "orderType", None),
-                            "lmtPrice": getattr(o, "lmtPrice", None),
-                            "auxPrice": getattr(o, "auxPrice", None),
-                            "tif": getattr(o, "tif", None),
-                        
-                            # NEW — contract identity so we can rebuild order:
-                            "conId": getattr(o.contract, "conId", None),
-                            "symbol": getattr(o.contract, "symbol", None),
-                            "secType": getattr(o.contract, "secType", None),
-                            "exchange": getattr(o.contract, "exchange", None),
-                            "localSymbol": getattr(o.contract, "localSymbol", None),
-                            "ltm": getattr(o.contract, "lastTradeDateOrContractMonth", None),
-                        })
-    
-                    except Exception:
-                        continue
-                
+                for t in trades:
+                    o = t.order
+                    c = t.contract
+
+                    orders_snapshot.append({
+                        "orderId": getattr(o, "orderId", None),
+                        "action": getattr(o, "action", None),
+                        "totalQuantity": getattr(o, "totalQuantity", None),
+                        "orderType": getattr(o, "orderType", None),
+                        "lmtPrice": getattr(o, "lmtPrice", None),
+                        "auxPrice": getattr(o, "auxPrice", None),
+                        "tif": getattr(o, "tif", None),
+
+                        # Correct contract fields (trade.contract is ALWAYS valid)
+                        "conId": getattr(c, "conId", None),
+                        "symbol": getattr(c, "symbol", None),
+                        "secType": getattr(c, "secType", None),
+                        "exchange": getattr(c, "exchange", None),
+                        "localSymbol": getattr(c, "localSymbol", None),
+                        "ltm": getattr(c, "lastTradeDateOrContractMonth", None),
+                        "currency": getattr(c, "currency", None),
+                    })
+
+                # cancel everything
                 cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number)
 
-            
+            #
+            # --- POSITION SNAPSHOT ---
+            #
+
+            snapshot: Dict[str, Any] = {}
+
             if not pos:
                 log_step(acc.account_number, "No open position to close")
             else:
-                snapshot: Dict[str, Any] = {}
                 for p in pos:
                     if int(p.position) != 0:
-                        key = str(getattr(p.contract, "conId", "")) or f"{p.contract.secType}:{p.contract.symbol}:{getattr(p.contract, 'exchange', '')}"
+                        c = p.contract
+                        key = (
+                            str(getattr(c, "conId", "")) or
+                            f"{c.secType}:{c.symbol}:{getattr(c, 'exchange', '')}"
+                        )
                         snapshot[key] = {
-                            "secType": p.contract.secType,
-                            "symbol": p.contract.symbol,
-                            "exchange": getattr(p.contract, "exchange", ""),
-                            "currency": getattr(p.contract, "currency", ""),
-                            "lastTradeDateOrContractMonth": getattr(p.contract, "lastTradeDateOrContractMonth", ""),
+                            "secType": c.secType,
+                            "symbol": c.symbol,
+                            "exchange": getattr(c, "exchange", ""),
+                            "currency": getattr(c, "currency", ""),
+                            "lastTradeDateOrContractMonth": getattr(c, "lastTradeDateOrContractMonth", ""),
                             "position": int(p.position),
                         }
-    
+
+                #
+                # --- CLOSE POSITIONS ---
+                #
                 for p in pos:
                     q = int(p.position)
                     if q == 0:
                         continue
-                    log_step(acc.account_number, f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}")
-                    close_position(ib, p.contract, q, acc.account_number)
 
-            #logger.info(f"[IB] Disconnect acct={acc.account_number} port={acc.api_port} client_id={acc.client_id}")
+                    log_step(
+                        acc.account_number,
+                        f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}"
+                    )
+
+                    # unchanged: close the position exactly as before
+                    close_position(ib, p.contract, q, acc.account_number)
 
             ib.disconnect()
 
+            #
+            # Save state
+            #
             with _state_lock:
                 st = load_state()
                 st.setdefault("preclose", {})
@@ -991,17 +1015,20 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     "done": True,
                     "at": now_local.isoformat(),
                     "snapshot": snapshot,
-                    "orders_snapshot": orders_snapshot,
+                    "orders_snapshot": orders_snapshot,   # now ALWAYS defined
                     "reopen_done": False,
                     "reopen_at": None,
                 }
                 save_state(st)
 
             log_step(acc.account_number, f"Preclose: acct={acc.account_number} completed snapshot_count={len(snapshot)}")
+
         except Exception as e:
             log_step(acc.account_number, f"Preclose error acct={acc.account_number}: {e}")
+
         finally:
             flush_account_log(acc.account_number, "PRECLOSE_EXEC")
+
         
 
 
