@@ -1081,8 +1081,9 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
 
             # must have preclose + not already reopened
             if not entry or not entry.get("done"):
-                continue
-            if entry.get("reopen_done"):
+                log_step(acc.account_number, "Nothing to reopen")
+            if entry.get("reopen_done") or entry.get("done"):
+                log_step(acc.account_number, "Postopen was already triggered")
                 continue
 
             snapshot: Dict[str, Any] = entry.get("snapshot", {}) or {}
