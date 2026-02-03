@@ -1243,7 +1243,6 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         except:
             trades = []
         
-        # Filter only trades matching this contract (by conId)
         filtered = []
         for t in trades:
             try:
@@ -1253,33 +1252,29 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 continue
         
         if filtered:
-            grouped = {}
-        
+            log_step(acc.account_number, "Open orders for symbol:")
             for t in filtered:
-                c = t.contract
-                key = f"{c.conId}-{c.localSymbol}"  # unique grouping for this contract only
-        
-                if key not in grouped:
-                    grouped[key] = []
-        
                 try:
-                    grouped[key].append(
-                        f"{t.order.orderType} {t.order.action} "
-                        f"qty={t.order.totalQuantity} "
-                        f"status={t.orderState.status}"
+                    c = t.contract
+                    o = t.order
+                    os = t.orderState
+        
+                    log_step(
+                        acc.account_number,
+                        "  " + " ".join([
+                            f"type={getattr(o,'orderType',None)}",
+                            f"action={getattr(o,'action',None)}",
+                            f"qty={getattr(o,'totalQuantity',None)}",
+                            f"status={getattr(os,'status',None)}"
+                        ])
                     )
                 except:
                     continue
-        
-            blocks = []
-            for key, lst in grouped.items():
-                blocks.append(f"[CONTRACT {key}]\n  " + "\n  ".join(lst))
-        
-            log_step(acc.account_number, "Open orders for symbol:\n" + "\n\n".join(blocks))
-        
         else:
             log_step(acc.account_number, "Open orders for symbol: NONE")
+        
         log_step(acc.account_number, "#############END OF STATE CHECK#################")
+
 
 
 
