@@ -1239,13 +1239,11 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             log_step(acc.account_number, "Current position for symbol: No opened positions")
         
         try:
-            ib.reqIds()                 # <-- FIX
-            ib.waitOnUpdate(timeout=1)
-            trades = list(ib.openTrades())   # <-- FIXED (cached, 0 blocking)
+            trades = ib.openTrades()
         except:
             trades = []
         
-        # Filter trades only for this contract
+        # Filter only trades matching this contract (by conId)
         filtered = []
         for t in trades:
             try:
@@ -1259,22 +1257,16 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
             for t in filtered:
                 c = t.contract
-                key = f"{c.conId}-{c.localSymbol}"
+                key = f"{c.conId}-{c.localSymbol}"  # unique grouping for this contract only
         
                 if key not in grouped:
                     grouped[key] = []
         
-                o = t.order
-                os = t.orderState
-        
                 try:
                     grouped[key].append(
-                        " ".join([
-                            f"type={o.orderType}",
-                            f"action={o.action}",
-                            f"qty={o.totalQuantity}",
-                            f"status={os.status}",
-                        ])
+                        f"{t.order.orderType} {t.order.action} "
+                        f"qty={t.order.totalQuantity} "
+                        f"status={t.orderState.status}"
                     )
                 except:
                     continue
@@ -1283,14 +1275,11 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             for key, lst in grouped.items():
                 blocks.append(f"[CONTRACT {key}]\n  " + "\n  ".join(lst))
         
-            log_step(acc.account_number,
-                     "Open orders for symbol:\n" + "\n\n".join(blocks))
+            log_step(acc.account_number, "Open orders for symbol:\n" + "\n\n".join(blocks))
         
         else:
             log_step(acc.account_number, "Open orders for symbol: NONE")
-        
         log_step(acc.account_number, "#############END OF STATE CHECK#################")
-
 
 
 
