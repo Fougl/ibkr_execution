@@ -846,21 +846,21 @@ def open_position_with_brackets(
                 f"BRACKET_ORDER: {o.orderType} {o.action} qty={o.totalQuantity} "
                 #f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)}"
             )
-            ib.sleep(0.2)  # let callbacks arrive
-
+            #ib.sleep(0.2)  # let callbacks arrive
+            ib.waitOnUpdate(timeout=1)
             st = trade.orderStatus
             log_step(
                 acct,
-                f"ORDER_STATUS: orderId={trade.order.orderId} permId={trade.order.permId} "
+                f"ORDER_STATUS: "
                 f"status={st.status} filled={st.filled} remaining={st.remaining} "
-                f"avgFill={st.avgFillPrice} lastFill={st.lastFillPrice} "
-                f"whyHeld={st.whyHeld} lastErr={trade.log[-1].message if trade.log else ''}"
+                f"avgFill={st.avgFillPrice}"
+                f"lastError={trade.log[-1].message if trade.log else ''}"
             )
         except Exception as e:
             log_step(acct, f"BRACKET_ORDER_FAIL: err={e}")
             return
     ib.sleep(0.5)
-    #log_step(acct, f"OPEN_ORDERS_AFTER: {len(ib.openOrders())}")
+    log_step(acct, f"OPEN_POSITIONS_AFTER: {len(ib.positions())}")
     log_step(acct, f"OPEN_TRADES_AFTER: {len(ib.openTrades())}")
 
     #log_step(acct, "BRACKET_ORDER_DONE")
