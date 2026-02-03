@@ -1160,9 +1160,15 @@ def parse_timestamp(value) -> float | None:
 # ---------------------------
 def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings) -> Dict[str, Any]:
     #logger.info(f"[EXEC] Start acct={acc.account_number} port={acc.api_port} client_id={acc.client_id} alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty}")
-    log_step(acc.account_number,
-         f"EXEC_START alert={sig.raw_alert} symbol={sig.symbol} dir={sig.desired_direction} qty={sig.desired_qty}")
-
+    # log_step(acc.account_number,
+    #      f"EXEC_START alert={sig.raw_alert} symbol={sig.symbol} dir=SELL if {sig.desired_direction==-1} else 'BUY' qty={sig.desired_qty}")
+    log_step(
+        acc.account_number,
+        f"EXEC_START alert={sig.raw_alert} "
+        f"symbol={sig.symbol} "
+        f"dir={'SELL' if sig.desired_direction == -1 else 'BUY'} "
+        f"qty={sig.desired_qty}"
+    )
     result = {
         "account_number": acc.account_number,
         "secret_name": acc.secret_name,
@@ -1225,38 +1231,55 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
         qty = current_position_qty(ib, contract)
         
-        # Position info
+        log_step(acc.account_number, "#############STATE CHECK######################")
         if qty != 0:
             side = "BUY" if qty > 0 else "SELL"
-            log_step(acc.account_number, f"CURRENT_POSITION: {side} {abs(qty)}")
+            log_step(acc.account_number, f"Current position for symbol: {side} {abs(qty)}")
         else:
-            log_step(acc.account_number, "CURRENT_POSITION: FLAT")
+            log_step(acc.account_number, "Current position for symbol: No opened positions")
         
-        # Always list all open orders for this account (no filtering)
         try:
-            ib.reqOpenOrders()
-            ib.waitOnUpdate(timeout=1)
-            open_orders = ib.openOrders()
+            trades = ib.openTrades()
         except:
-            open_orders = []
+            trades = []
         
-        if open_orders:
-            lines = []
-            for o in open_orders:
+        # Filter only trades matching this contract (by conId)
+        filtered = []
+        for t in trades:
+            try:
+                if t.contract and t.contract.conId == contract.conId:
+                    filtered.append(t)
+            except:
+                continue
+        
+        if filtered:
+            grouped = {}
+        
+            for t in filtered:
+                c = t.contract
+                key = f"{c.conId}-{c.localSymbol}"  # unique grouping for this contract only
+        
+                if key not in grouped:
+                    grouped[key] = []
+        
                 try:
-                    lines.append(
-                        f"{o.orderType} {o.action} qty={o.totalQuantity} "
-                        f"lmt={getattr(o,'lmtPrice',None)} "
-                        f"stp={getattr(o,'auxPrice',None)} tif={o.tif} "
-                        f"conId={getattr(o.contract,'conId',None)} "
-                        f"symbol={getattr(o.contract,'localSymbol',o.contract.symbol)}"
+                    grouped[key].append(
+                        f"{t.order.orderType} {t.order.action} "
+                        f"qty={t.order.totalQuantity} "
+                        f"status={t.orderState.status}"
                     )
                 except:
                     continue
         
-            log_step(acc.account_number, "OPEN_ORDERS:\n  " + "\n  ".join(lines))
+            blocks = []
+            for key, lst in grouped.items():
+                blocks.append(f"[CONTRACT {key}]\n  " + "\n  ".join(lst))
+        
+            log_step(acc.account_number, "Open orders for symbol:\n" + "\n\n".join(blocks))
+        
         else:
-            log_step(acc.account_number, "OPEN_ORDERS: NONE")
+            log_step(acc.account_number, "Open orders for symbol: NONE")
+        log_step(acc.account_number, "#############END OF STATE CHECK#################")
 
 
 
