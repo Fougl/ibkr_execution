@@ -680,44 +680,56 @@ def ib_connect(host: str, port: int, client_id: int) -> IB:
     return ib
 
 
-def cancel_all_open_orders(ib: IB, reason: str, acct: int) -> int:
+def cancel_all_open_orders(ib: IB, reason: str, acct: int, symbol: str) -> int:
     """
-    Cancels ALL open orders for this account (IB client).
+    Cancels ONLY open orders for the given symbol.
     Returns number of cancel attempts.
     """
     attempts = 0
 
-    # Update open orders from IB
+    # Request updated open orders/trades from IB
     try:
-        ib.reqOpenOrders()
+        ib.reqAllOpenOrders()
         ib.waitOnUpdate(timeout=2)
     except Exception as e:
-        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqOpenOrders err={e}")
+        log_step(acct, f"CANCEL_ORDERS_FAIL: cannot reqAllOpenOrders err={e}")
 
-    try:
-        orders = list(ib.openOrders())
-    except Exception as e:
-        log_step(acct, f"CANCEL_ORDERS_FAIL: error fetching openOrders err={e}")
-        orders = []
+    # openTrades() gives contract + order
+    trades = list(ib.openTrades())
 
-    if not orders:
-        log_step(acct, "CANCEL_ORDERS: none_found")
+    # Filter only this symbol
+    orders_for_symbol = []
+    for t in trades:
+        c = t.contract
+        o = t.order
+        if getattr(c, "localSymbol", c.symbol) == symbol:
+            orders_for_symbol.append(o)
+
+    if not orders_for_symbol:
+        log_step(acct, "CANCEL_ORDERS: none_for_symbol")
         return 0
 
-    log_step(acct, f"CANCEL_ORDERS: found {len(orders)}")
+    log_step(acct, f"CANCEL_ORDERS: found {len(orders_for_symbol)} for {symbol}")
 
-    for o in orders:
+    for o in orders_for_symbol:
         oid = getattr(o, "orderId", None)
         try:
             ib.cancelOrder(o)
             attempts += 1
             ib.sleep(0.2)
-            log_step(acct, f"CANCEL_ORDER: orderId={oid} reason={reason}")
+
+            log_step(
+                acct,
+                f"CANCEL_ORDER: type={o.orderType} orderId={oid} "
+                f"reason={reason} lmt={getattr(o,'lmtPrice',None)} "
+                f"stp={getattr(o,'auxPrice',None)}"
+            )
         except Exception as e:
             log_step(acct, f"CANCEL_ORDER_FAIL: orderId={oid} reason={reason} err={e}")
 
     log_step(acct, f"CANCEL_ORDERS_DONE: total_attempts={attempts}")
     return attempts
+
 
 
 
@@ -1262,7 +1274,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 except:
                     continue
         
-            log_step(acc.account_number, "OPEN_ORDERS:\n  " + "\n  ".join(lines))
+                log_step(acc.account_number, "OPEN_ORDERS:\n  " + "\n  ".join(lines))
         else:
             log_step(acc.account_number, "OPEN_ORDERS: NONE")
 
