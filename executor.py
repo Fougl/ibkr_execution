@@ -921,21 +921,20 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                       .get(str(acc.account_number), {})
                       .get("done", False)
                 )
-            # if already:
-            #     continue
+            if already:
+                continue
 
             ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
             pos = ib.positions()
 
-            #
-            # --- SNAPSHOT OPEN TRADES INSTEAD OF OPEN ORDERS ---
-            #
-
-            # try:
-            #     ib.reqOpenOrders()
-            #     ib.waitOnUpdate(timeout=2)
-            # except Exception:
-            #     pass
+            # =======================================================
+            # SNAPSHOT OPEN TRADES (NOT openOrders)
+            # =======================================================
+            try:
+                ib.reqOpenOrders()
+                ib.waitOnUpdate(timeout=2)
+            except Exception:
+                pass
 
             trades = list(ib.openTrades())
             orders_snapshot: List[Dict[str, Any]] = []
@@ -956,7 +955,6 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                         "auxPrice": getattr(o, "auxPrice", None),
                         "tif": getattr(o, "tif", None),
 
-                        # Correct contract fields (trade.contract is ALWAYS valid)
                         "conId": getattr(c, "conId", None),
                         "symbol": getattr(c, "symbol", None),
                         "secType": getattr(c, "secType", None),
@@ -966,13 +964,25 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                         "currency": getattr(c, "currency", None),
                     })
 
-                # cancel everything
                 cancel_all_open_orders(ib, reason="preclose", acct=acc.account_number)
 
-            #
-            # --- POSITION SNAPSHOT ---
-            #
+            # =======================================================
+            # BUILD MAP FOR CORRECT CONTRACT PAIRING BY conId
+            # =======================================================
+            qualified_by_conid = {}
+            try:
+                more_trades = ib.openTrades()
+                for t in more_trades:
+                    qc = t.contract
+                    cid = getattr(qc, "conId", None)
+                    if cid:
+                        qualified_by_conid[cid] = qc
+            except:
+                pass
 
+            # =======================================================
+            # POSITION SNAPSHOT
+            # =======================================================
             snapshot: Dict[str, Any] = {}
 
             if not pos:
@@ -994,27 +1004,41 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                             "position": int(p.position),
                         }
 
-                #
-                # --- CLOSE POSITIONS ---
-                #
+                # =======================================================
+                # CLOSE POSITION using paired, qualified contract
+                # =======================================================
                 for p in pos:
                     q = int(p.position)
                     if q == 0:
                         continue
+                    
+                    pc = p.contract
+                    cid = getattr(pc, "conId", None)
+
+                    # try match correct contract by conId
+                    c = qualified_by_conid.get(cid, pc)
+
+                    # safety — if missing exchange, qualify automatically
+                    if not getattr(c, "exchange", None):
+                        try:
+                            qc = ib.qualifyContracts(c)
+                            if qc:
+                                c = qc[0]
+                        except:
+                            pass
 
                     log_step(
                         acc.account_number,
-                        f"Preclose: acct={acc.account_number} closing {p.contract.secType} {p.contract.symbol} qty={q}"
+                        f"Preclose: acct={acc.account_number} closing {c.secType} {c.symbol} conId={cid} exch={getattr(c,'exchange',None)} qty={q}"
                     )
 
-                    # unchanged: close the position exactly as before
-                    close_position(ib, p.contract, q, acc.account_number)
+                    close_position(ib, c, q, acc.account_number)
 
             ib.disconnect()
 
-            #
-            # Save state
-            #
+            # =======================================================
+            # SAVE PRE-CLOSE STATE
+            # =======================================================
             with _state_lock:
                 st = load_state()
                 st.setdefault("preclose", {})
@@ -1023,7 +1047,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
                     "done": True,
                     "at": now_local.isoformat(),
                     "snapshot": snapshot,
-                    "orders_snapshot": orders_snapshot,   # now ALWAYS defined
+                    "orders_snapshot": orders_snapshot,
                     "reopen_done": False,
                     "reopen_at": None,
                 }
@@ -1036,6 +1060,7 @@ def ensure_preclose_close_if_needed(settings: Settings, accounts: List[AccountSp
 
         finally:
             flush_account_log(acc.account_number, "PRECLOSE_EXEC")
+
 
         
 
