@@ -1243,7 +1243,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         except:
             trades = []
         
-        # Filter only trades matching this contract (by conId)
+        # Filter trades only for this contract
         filtered = []
         for t in trades:
             try:
@@ -1257,16 +1257,22 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         
             for t in filtered:
                 c = t.contract
-                key = f"{c.conId}-{c.localSymbol}"  # unique grouping for this contract only
+                key = f"{c.conId}-{c.localSymbol}"
         
                 if key not in grouped:
                     grouped[key] = []
         
+                o = t.order
+                os = t.orderState
+        
                 try:
                     grouped[key].append(
-                        f"{t.order.orderType} {t.order.action} "
-                        f"qty={t.order.totalQuantity} "
-                        f"status={t.orderState.status}"
+                        " ".join([
+                            f"type={o.orderType}",
+                            f"action={o.action}",
+                            f"qty={o.totalQuantity}",
+                            f"status={os.status}",
+                        ])
                     )
                 except:
                     continue
@@ -1275,11 +1281,14 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             for key, lst in grouped.items():
                 blocks.append(f"[CONTRACT {key}]\n  " + "\n  ".join(lst))
         
-            log_step(acc.account_number, "Open orders for symbol:\n" + "\n\n".join(blocks))
+            log_step(acc.account_number, 
+                     "Open orders for symbol:\n" + "\n\n".join(blocks))
         
         else:
             log_step(acc.account_number, "Open orders for symbol: NONE")
+        
         log_step(acc.account_number, "#############END OF STATE CHECK#################")
+
 
 
 
