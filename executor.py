@@ -744,9 +744,9 @@ def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
 
     # Give IB a chance to update
     #time.sleep(1)
-    #ib.waitOnUpdate(timeout=1)
-    ib.sleep(0.2)
-    time.sleep(0.2)
+    ib.waitOnUpdate(timeout=1)
+    #ib.sleep(0.2)
+    #time.sleep(0.2)
 
     # Check if it actually closed
     remaining = current_position_qty(ib, contract)
