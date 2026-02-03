@@ -1259,14 +1259,13 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 try:
                     c = t.contract
                     o = t.order
-                    os = t.orderState
+                    #os = t.orderState
         
                     log_step(
                         acc.account_number,
                             f"type={getattr(o,'orderType',None)}",
                             f"action={getattr(o,'action',None)}",
-                            f"qty={getattr(o,'totalQuantity',None)}",
-                            f"status={getattr(os,'status',None)}"
+                            f"qty={getattr(o,'totalQuantity',None)}"
                         
                     )
                 except:
