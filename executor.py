@@ -1274,7 +1274,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 except:
                     continue
         
-                log_step(acc.account_number, "OPEN_ORDERS:\n  " + "\n  ".join(lines))
+            log_step(acc.account_number, "OPEN_ORDERS:\n  " + "\n  ".join(lines))
         else:
             log_step(acc.account_number, "OPEN_ORDERS: NONE")
 
