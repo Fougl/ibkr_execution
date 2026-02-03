@@ -847,7 +847,7 @@ def open_position_with_brackets(
             log_step(
                 acct,
                 f"BRACKET_ORDER: {o.orderType} {o.action} qty={o.totalQuantity} "
-                f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)}"
+                #f"lmt={getattr(o,'lmtPrice',None)} stp={getattr(o,'auxPrice',None)}"
             )
             ib.sleep(0.2)  # let callbacks arrive
 
@@ -863,7 +863,7 @@ def open_position_with_brackets(
             log_step(acct, f"BRACKET_ORDER_FAIL: err={e}")
             return
     ib.sleep(0.5)
-    log_step(acct, f"OPEN_ORDERS_AFTER: {len(ib.openOrders())}")
+    #log_step(acct, f"OPEN_ORDERS_AFTER: {len(ib.openOrders())}")
     log_step(acct, f"OPEN_TRADES_AFTER: {len(ib.openTrades())}")
 
     #log_step(acct, "BRACKET_ORDER_DONE")
@@ -1357,7 +1357,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Retry close
             if not wait_until_flat(ib, contract, settings):
-                log_step(acc.account_number, "Reversal close not reflected — retrying")
+                log_step(acc.account_number, "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
                 #close_position(ib, contract, qty)
                 time.sleep(1)
                 result.update({"ok": False, "action": "reversal_close_not_confirmed"})
