@@ -545,6 +545,9 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     import re
     alert = str(payload.get("alert", "")).strip()
     symbol_raw = str(payload.get("symbol", "")).strip()
+    symbol_raw = symbol_raw.rstrip("!")
+    
+    
     if not symbol_raw:
         raise ValueError("Missing 'symbol' in payload")
     if not alert:
@@ -560,7 +563,9 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         # fallback: use raw
         symbol = symbol_raw
     exchange_raw = str(payload.get("exchange", "")).strip()
+    logger.info(f"[DBG_PARSE] RAW symbol={symbol_raw!r} RAW exchange={exchange_raw!r}")
     exchange = exchange_raw.split("_")[0]
+    logger.info(f"[DBG_PARSE] Normalized symbol={symbol!r} exchange={exchange!r}")
 
 
     a = alert.lower()
