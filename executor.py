@@ -483,36 +483,44 @@ def get_symbol_map() -> Dict[str, Dict[str, str]]:
     return DEFAULT_SYMBOL_MAP
 
 
-def build_contract(tv_symbol: str) -> Contract:
-    m = get_symbol_map()
-    if tv_symbol not in m:
-        raise ValueError(f"Unknown symbol mapping for '{tv_symbol}'. Configure SYMBOL_MAP_JSON or DEFAULT_SYMBOL_MAP.")
+# def build_contract(tv_symbol: str) -> Contract:
+#     m = get_symbol_map()
+#     if tv_symbol not in m:
+#         raise ValueError(f"Unknown symbol mapping for '{tv_symbol}'. Configure SYMBOL_MAP_JSON or DEFAULT_SYMBOL_MAP.")
 
-    info = m[tv_symbol]
+#     info = m[tv_symbol]
 
-    if info.get("secType") == "FUT":
-        symbol = info.get("symbol", "")
-        exchange = info.get("exchange", "CME")
-        currency = info.get("currency", "USD")
+#     if info.get("secType") == "FUT":
+#         symbol = info.get("symbol", "")
+#         exchange = info.get("exchange", "CME")
+#         currency = info.get("currency", "USD")
 
-        # FIXED: local_symbol should come from localSymbol, NOT currency
-        local_symbol = info.get("localSymbol", "")
-        ltm = info.get("lastTradeDateOrContractMonth", "")
+#         # FIXED: local_symbol should come from localSymbol, NOT currency
+#         local_symbol = info.get("localSymbol", "")
+#         ltm = info.get("lastTradeDateOrContractMonth", "")
 
-        # logger.info(
-        #     f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
-        #     f"| currency={currency} | local_symbol={local_symbol}"
-        # )
+#         # logger.info(
+#         #     f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
+#         #     f"| currency={currency} | local_symbol={local_symbol}"
+#         # )
 
-        return Future(
-            symbol=symbol,
-            lastTradeDateOrContractMonth=ltm,
-            exchange=exchange,
-            currency=currency,
-            localSymbol=local_symbol,
-        )
+#         return Future(
+#             symbol=symbol,
+#             lastTradeDateOrContractMonth=ltm,
+#             exchange=exchange,
+#             currency=currency,
+#             localSymbol=local_symbol,
+#         )
 
-    raise ValueError(f"Unsupported secType for {tv_symbol}: {info.get('secType')}")
+#     raise ValueError(f"Unsupported secType for {tv_symbol}: {info.get('secType')}")
+
+def build_contract(sig: Signal) -> Contract:
+    c = Future(
+        localSymbol=sig.symbol,     # Already full code like MNQH5, NQH5, ESZ4
+        exchange=sig.exchange,      # Provided by webhook
+        currency="USD"
+    )
+    return c
 
 
 # ---------------------------
@@ -521,6 +529,7 @@ def build_contract(tv_symbol: str) -> Contract:
 @dataclass
 class Signal:
     symbol: str
+    exchange: str
     desired_direction: int  # +1 long, -1 short, 0 exit/flat
     desired_qty: int
     raw_alert: str
@@ -531,15 +540,28 @@ class Signal:
     risk_valid: bool | None = None 
 
 
-
     
 def parse_signal(payload: Dict[str, Any]) -> Signal:
+    import re
     alert = str(payload.get("alert", "")).strip()
-    symbol = str(payload.get("symbol", "")).strip()
-    if not symbol:
+    symbol_raw = str(payload.get("symbol", "")).strip()
+    if not symbol_raw:
         raise ValueError("Missing 'symbol' in payload")
     if not alert:
         raise ValueError("Missing 'alert' in payload")
+        
+    m = re.match(r"^([A-Z]+)([FGHJKMNQUVXZ])(\d{4})$", symbol_raw)
+    if m:
+        root = m.group(1)            # MES
+        month = m.group(2)           # H
+        year_last = m.group(3)[-1]   # "2026" → "6"
+        symbol = f"{root}{month}{year_last}"
+    else:
+        # fallback: use raw
+        symbol = symbol_raw
+    exchange_raw = str(payload.get("exchange", "")).strip()
+    exchange = exchange_raw.split("_")[0]
+
 
     a = alert.lower()
     
@@ -585,6 +607,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     if "exit" in a and "long" in a:
         return Signal(
             symbol=symbol,
+            exchange=exchange,
             desired_direction=0,
             desired_qty=0,
             raw_alert=alert,
@@ -597,6 +620,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     if "exit" in a and "short" in a:
         return Signal(
             symbol=symbol,
+            exchange=exchange,
             desired_direction=0,
             desired_qty=0,
             raw_alert=alert,
@@ -610,6 +634,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     if ("entry" in a and "long" in a) or ("enter" in a and "long" in a) or a in ("long", "buy", "enter long", "entry long"):
         return Signal(
             symbol=symbol,
+            exchange=exchange,
             desired_direction=+1,
             desired_qty=qty_i,
             raw_alert=alert,
@@ -624,6 +649,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     if ("entry" in a and "short" in a) or ("enter" in a and "short" in a) or a in ("short", "sell", "enter short", "entry short"):
         return Signal(
             symbol=symbol,
+            exchange=exchange,
             desired_direction=-1,
             desired_qty=qty_i,
             raw_alert=alert,
@@ -1080,7 +1106,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings, accounts: List[AccountS
                 entry = st.get("preclose", {}).get(dayk, {}).get(str(acc.account_number))
 
             # must have preclose + not already reopened
-            if not entry or not entry.get("done"):
+            if not entry:
                 log_step(acc.account_number, "Nothing to reopen")
             if entry.get("reopen_done") or entry.get("done"):
                 log_step(acc.account_number, "Postopen was already triggered")
@@ -1290,7 +1316,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
             }
 
 
-        contract = build_contract(sig.symbol)
+        contract = build_contract(sig)
         # Qualify contract and detect ambiguity
         qualified = ib.qualifyContracts(contract)
         #logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
