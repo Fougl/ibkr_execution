@@ -827,22 +827,22 @@ def open_position_with_brackets(
     # ----------------------------------------------------
     # MARKET PRICE (reference for multipliers)
     # ----------------------------------------------------
-    ref_price = None
+    # ref_price = None
 
-    if tp_sl_are_multipliers:
-        t = ib.reqMktData(contract, "", False, False)
-        t0 = time.time()
-        while time.time() - t0 < 3:
-            ib.waitOnUpdate(timeout=0.5)
-            mp = t.marketPrice()
-            if mp and mp > 0:
-                ref_price = float(mp)
-                break
-        ib.cancelMktData(contract)
+    # if tp_sl_are_multipliers:
+    #     t = ib.reqMktData(contract, "", False, False)
+    #     t0 = time.time()
+    #     while time.time() - t0 < 3:
+    #         ib.waitOnUpdate(timeout=0.5)
+    #         mp = t.marketPrice()
+    #         if mp and mp > 0:
+    #             ref_price = float(mp)
+    #             break
+    #     ib.cancelMktData(contract)
 
-        if not ref_price:
-            log_step(acct, "ENTRY_PRICE_FAIL: cannot compute TP/SL — no market data")
-            return
+    #     if not ref_price:
+    #         log_step(acct, "ENTRY_PRICE_FAIL: cannot compute TP/SL — no market data")
+    #         return
 
     # ----------------------------------------------------
     # COMPUTE TP / SL
@@ -851,12 +851,12 @@ def open_position_with_brackets(
     if tp_sl_are_multipliers:
         # incoming values are multipliers, e.g. 1.02, 0.995
         try:
-            tp_price = ref_price * float(take_profit)
+            tp_price = 6900 * float(take_profit)
         except:
             tp_price = None
 
         try:
-            sl_price = ref_price * float(stop_loss)
+            sl_price = 6900 * float(stop_loss)
         except:
             sl_price = None
 
