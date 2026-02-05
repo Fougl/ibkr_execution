@@ -1422,6 +1422,12 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
             #logger.info(f"[EXEC] Branch=EXIT acct={acc.account_number} current_qty={qty}")
+            cancel_all_open_orders(
+                ib,
+                reason="exit_signal",
+                acct=acc.account_number,
+                contract=contract
+            )
             if qty == 0:
                 log_step(acc.account_number, "No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
