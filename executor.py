@@ -1409,7 +1409,8 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
                 sig_age = now_ts - sig.signal_timestamp
             except:
                 sig_age = None
-
+        log_step(acc.account_number, f"[EXEC] Signal timestamp {sig.signal}  {sig.age} {int(settings.execution_delay)}")
+        allow_entry = False
         allow_entry = True
         if sig.desired_direction != 0 and sig_age is not None:
             if sig_age > int(settings.execution_delay):
