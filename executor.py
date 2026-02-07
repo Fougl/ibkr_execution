@@ -1589,6 +1589,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
         # ----------------------------------------------------------
         if qty == 0:
             # Skip stale entries
+            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number, contract=contract)
             if not allow_entry:
                 result.update({
                     "ok": True,
@@ -1615,7 +1616,7 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
-            cancel_all_open_orders(ib, reason="before_new_entry", acct=acc.account_number, contract=contract)
+            
             open_position_with_brackets(
                 ib,
                 contract,
