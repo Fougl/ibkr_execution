@@ -263,59 +263,110 @@ class SettingsCache:
 settings_cache = SettingsCache()
 
 
-PARAM_PATHS = [
-    "/ankro/settings/delay_sec",
-    "/ankro/settings/execution_delay",
-    "/ankro/settings/pre_close_min",
-    "/ankro/settings/post_open_min",
-    "/ankro/settings/market_open",
-    "/ankro/settings/market_close",
-    "/ankro/settings/timezone",
-]
+# PARAM_PATHS = [
+#     "/ankro/settings/delay_sec",
+#     "/ankro/settings/execution_delay",
+#     "/ankro/settings/pre_close_min",
+#     "/ankro/settings/post_open_min",
+#     "/ankro/settings/market_open",
+#     "/ankro/settings/market_close",
+#     "/ankro/settings/timezone",
+# ]
 
 def load_settings_from_ssm() -> "Settings":
-    """
-    Load settings from AWS SSM Parameter Store with full logging and safe fallbacks.
-    """
-    try:
-        ssm = boto3.client("ssm", region_name=REGION)
+    ssm = boto3.client("ssm", region_name=REGION)
 
-        resp = ssm.get_parameters(
-            Names=PARAM_PATHS,
+    try:
+        resp = ssm.get_parameter(
+            Name="/ankro/settings",
             WithDecryption=False
         )
-
-        # Build key/value dict
-        kv = {}
-        for p in resp.get("Parameters", []):
-            name = p["Name"].split("/")[-1]
-            kv[name] = p["Value"]
-
-        log_step("GLOBAL", f"Loaded SSM settings OK: {kv}")
-
-        return Settings(
-            delay_sec       = int(kv.get("delay_sec", 2)),
-            execution_delay = int(kv.get("execution_delay", 2)),
-            pre_close_min   = int(kv.get("pre_close_min", 10)),
-            post_open_min   = int(kv.get("post_open_min", 5)),
-            market_open     = kv.get("market_open", "09:30"),
-            market_close    = kv.get("market_close", "16:00"),
-            timezone        = kv.get("timezone", "America/New_York"),
-        )
+        raw = resp["Parameter"]["Value"]
+        data = json.loads(raw)
+        #log_step(0, f"[SSM] Loaded JSON settings: {data}")
 
     except Exception as e:
-        log_step("GLOBAL", f"[ERROR] Failed to load SSM settings: {e} — using defaults")
+        log_step(0, f"[SSM ERROR] Failed loading /ankro/settings: {e}")
+        data = {}
 
-        # SAFE DEFAULTS if SSM fails
-        return Settings(
-            delay_sec       = 2,
-            execution_delay = 2,
-            pre_close_min   = 10,
-            post_open_min   = 5,
-            market_open     = "09:30",
-            market_close    = "16:00",
-            timezone        = "America/New_York",
-        )
+    def get(key, default):
+        return data.get(key, default)
+
+    return Settings(
+        delay_sec          = int(get("delay_sec", 2)),
+        execution_delay    = int(get("execution_delay", 2)),
+        pre_close_min      = int(get("pre_close_min", 10)),
+        post_open_min      = int(get("post_open_min", 5)),
+        market_open        = str(get("market_open", "09:30")),
+        market_close       = str(get("market_close", "16:00")),
+        timezone           = str(get("timezone", "America/New_York")),
+    )
+
+
+# def load_settings_from_ddb() -> Settings:
+#     try:
+#         #logger.info(f"[DDB] Loading settings table={DDB_TABLE} PK={DDB_PK} SK={DDB_SK}")
+#         # ddb = boto3.client("dynamodb", region_name=resolved_region())
+#         ddb = boto3.client("dynamodb", region_name=REGION)
+
+#         resp = ddb.get_item(
+#             TableName=DDB_TABLE,
+#             Key={"PK": {"S": DDB_PK}, "SK": {"S": DDB_SK}},
+#             ConsistentRead=True,
+#         )
+#         item = resp.get("Item", {})
+#         #logger.info(f"[DDB] Settings item_found={bool(item)}")
+#         if not item:
+#             logger.info("DynamoDB settings not found; using defaults.")
+#             return Settings()
+#         return Settings.from_ddb(item)
+#     except Exception as e:
+#         logger.exception(f"Failed to load DynamoDB settings; using defaults. err={e}")
+#         return Settings()
+    
+# def load_settings_from_ssm() -> "Settings":
+#     """
+#     Load settings from AWS SSM Parameter Store with full logging and safe fallbacks.
+#     """
+#     try:
+#         ssm = boto3.client("ssm", region_name=REGION)
+
+#         resp = ssm.get_parameters(
+#             Names=PARAM_PATHS,
+#             WithDecryption=False
+#         )
+
+#         # Build key/value dict
+#         kv = {}
+#         for p in resp.get("Parameters", []):
+#             name = p["Name"].split("/")[-1]
+#             kv[name] = p["Value"]
+
+#         log_step("GLOBAL", f"Loaded SSM settings OK: {kv}")
+
+#         return Settings(
+#             delay_sec       = int(kv.get("delay_sec", 2)),
+#             execution_delay = int(kv.get("execution_delay", 2)),
+#             pre_close_min   = int(kv.get("pre_close_min", 10)),
+#             post_open_min   = int(kv.get("post_open_min", 5)),
+#             market_open     = kv.get("market_open", "09:30"),
+#             market_close    = kv.get("market_close", "16:00"),
+#             timezone        = kv.get("timezone", "America/New_York"),
+#         )
+
+#     except Exception as e:
+#         log_step("GLOBAL", f"[ERROR] Failed to load SSM settings: {e} — using defaults")
+
+#         # SAFE DEFAULTS if SSM fails
+#         return Settings(
+#             delay_sec       = 2,
+#             execution_delay = 2,
+#             pre_close_min   = 10,
+#             post_open_min   = 5,
+#             market_open     = "09:30",
+#             market_close    = "16:00",
+#             timezone        = "America/New_York",
+#         )
 
 
 # ---------------------------
