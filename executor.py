@@ -69,9 +69,9 @@ LOG_PATH = os.getenv("EXECUTOR_LOG_PATH", "/opt/ibc/execution/executor.log")
 STATE_PATH = os.getenv("EXECUTOR_STATE_PATH", "/opt/ibc/execution/executor_state.json")
 
 # DynamoDB settings
-DDB_TABLE = os.getenv("DDB_TABLE", "ankro-global-settings")
-DDB_PK = os.getenv("DDB_PK", "GLOBAL")
-DDB_SK = os.getenv("DDB_SK", "SETTINGS")
+# DDB_TABLE = os.getenv("DDB_TABLE", "ankro-global-settings")
+# DDB_PK = os.getenv("DDB_PK", "GLOBAL")
+# DDB_SK = os.getenv("DDB_SK", "SETTINGS")
 SETTINGS_CACHE_TTL_SEC = int(os.getenv("SETTINGS_CACHE_TTL_SEC", "10"))
 
 # Secrets Manager
@@ -253,7 +253,7 @@ class SettingsCache:
         with self._lock:
             if self._cached and (now - self._cached_at) < SETTINGS_CACHE_TTL_SEC:
                 return self._cached
-        s = load_settings_from_ddb()
+        s = load_settings_from_ssm()
         with self._lock:
             self._cached = s
             self._cached_at = now
@@ -263,27 +263,34 @@ class SettingsCache:
 settings_cache = SettingsCache()
 
 
-def load_settings_from_ddb() -> Settings:
-    try:
-        #logger.info(f"[DDB] Loading settings table={DDB_TABLE} PK={DDB_PK} SK={DDB_SK}")
-        # ddb = boto3.client("dynamodb", region_name=resolved_region())
-        ddb = boto3.client("dynamodb", region_name=REGION)
+PARAM_PATHS = [
+    "/ankro/settings/delay_sec",
+    "/ankro/settings/execution_delay",
+    "/ankro/settings/pre_close_min",
+    "/ankro/settings/post_open_min",
+    "/ankro/settings/market_open",
+    "/ankro/settings/market_close",
+    "/ankro/settings/timezone",
+]
 
-        resp = ddb.get_item(
-            TableName=DDB_TABLE,
-            Key={"PK": {"S": DDB_PK}, "SK": {"S": DDB_SK}},
-            ConsistentRead=True,
-        )
-        item = resp.get("Item", {})
-        #logger.info(f"[DDB] Settings item_found={bool(item)}")
-        if not item:
-            logger.info("DynamoDB settings not found; using defaults.")
-            return Settings()
-        return Settings.from_ddb(item)
-    except Exception as e:
-        logger.exception(f"Failed to load DynamoDB settings; using defaults. err={e}")
-        return Settings()
+def load_settings_from_ssm() -> "Settings":
+    ssm = boto3.client("ssm", region_name=REGION)
+    resp = ssm.get_parameters(Names=PARAM_PATHS, WithDecryption=False)
 
+    kv = {}
+    for p in resp["Parameters"]:
+        name = p["Name"].split("/")[-1]
+        kv[name] = p["Value"]
+
+    return Settings(
+        delay_sec          = int(kv.get("delay_sec", 2)),
+        execution_delay    = int(kv.get("execution_delay", 2)),
+        pre_close_min      = int(kv.get("pre_close_min", 10)),
+        post_open_min      = int(kv.get("post_open_min", 5)),
+        market_open        = kv.get("market_open", "09:30"),
+        market_close       = kv.get("market_close", "16:00"),
+        timezone           = kv.get("timezone", "America/New_York"),
+    )
 
 # ---------------------------
 # Secrets (list all ibkr secrets on-demand, cached)
