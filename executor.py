@@ -274,23 +274,49 @@ PARAM_PATHS = [
 ]
 
 def load_settings_from_ssm() -> "Settings":
-    ssm = boto3.client("ssm", region_name=REGION)
-    resp = ssm.get_parameters(Names=PARAM_PATHS, WithDecryption=False)
+    """
+    Load settings from AWS SSM Parameter Store with full logging and safe fallbacks.
+    """
+    try:
+        ssm = boto3.client("ssm", region_name=REGION)
 
-    kv = {}
-    for p in resp["Parameters"]:
-        name = p["Name"].split("/")[-1]
-        kv[name] = p["Value"]
+        resp = ssm.get_parameters(
+            Names=PARAM_PATHS,
+            WithDecryption=False
+        )
 
-    return Settings(
-        delay_sec          = int(kv.get("delay_sec", 2)),
-        execution_delay    = int(kv.get("execution_delay", 2)),
-        pre_close_min      = int(kv.get("pre_close_min", 10)),
-        post_open_min      = int(kv.get("post_open_min", 5)),
-        market_open        = kv.get("market_open", "09:30"),
-        market_close       = kv.get("market_close", "16:00"),
-        timezone           = kv.get("timezone", "America/New_York"),
-    )
+        # Build key/value dict
+        kv = {}
+        for p in resp.get("Parameters", []):
+            name = p["Name"].split("/")[-1]
+            kv[name] = p["Value"]
+
+        log_step("GLOBAL", f"Loaded SSM settings OK: {kv}")
+
+        return Settings(
+            delay_sec       = int(kv.get("delay_sec", 2)),
+            execution_delay = int(kv.get("execution_delay", 2)),
+            pre_close_min   = int(kv.get("pre_close_min", 10)),
+            post_open_min   = int(kv.get("post_open_min", 5)),
+            market_open     = kv.get("market_open", "09:30"),
+            market_close    = kv.get("market_close", "16:00"),
+            timezone        = kv.get("timezone", "America/New_York"),
+        )
+
+    except Exception as e:
+        log_step("GLOBAL", f"[ERROR] Failed to load SSM settings: {e} — using defaults")
+
+        # SAFE DEFAULTS if SSM fails
+        return Settings(
+            delay_sec       = 2,
+            execution_delay = 2,
+            pre_close_min   = 10,
+            post_open_min   = 5,
+            market_open     = "09:30",
+            market_close    = "16:00",
+            timezone        = "America/New_York",
+        )
+
 
 # ---------------------------
 # Secrets (list all ibkr secrets on-demand, cached)
