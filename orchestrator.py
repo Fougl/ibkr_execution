@@ -758,7 +758,7 @@ def main() -> None:
 
             for sname in sorted(list(changed)):
                 try:
-                    apply_account_changed(args, sname)
+                    apply_account_changed(args, sname, old_state)
                 except Exception:
                     cycle_ok = False
                     log_exception("Failed handling changed secret", secret=sname)
