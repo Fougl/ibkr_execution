@@ -909,45 +909,44 @@ def open_position_with_brackets(
     action = "BUY" if direction > 0 else "SELL"
 
     # ----------------------------------------------------
-    # MARKET PRICE (reference for multipliers)
+    # MARKET PRICE (reference)
     # ----------------------------------------------------
-    # ref_price = None
-
-    # if tp_sl_are_multipliers:
-    #     t = ib.reqMktData(contract, "", False, False)
-    #     t0 = time.time()
-    #     while time.time() - t0 < 3:
-    #         ib.waitOnUpdate(timeout=0.5)
-    #         mp = t.marketPrice()
-    #         if mp and mp > 0:
-    #             ref_price = float(mp)
-    #             break
-    #     ib.cancelMktData(contract)
-
-    #     if not ref_price:
-    #         log_step(acct, "ENTRY_PRICE_FAIL: cannot compute TP/SL — no market data")
-    #         return
-
+    t = ib.reqMktData(contract, "", False, False)
+    ref_price = None
+    t0 = time.time()
+    
+    while time.time() - t0 < 3:
+        ib.waitOnUpdate(timeout=0.5)
+        mp = t.marketPrice()
+        if mp and mp > 0:
+            ref_price = float(mp)
+            break
+    
+    ib.cancelMktData(contract)
+    
+    if not ref_price:
+        log_step(acct, "ENTRY_PRICE_FAIL: no market price")
+        return
+    
     # ----------------------------------------------------
-    # COMPUTE TP / SL
+    # PERCENT → PRICE CONVERSION
     # ----------------------------------------------------
-
-    if tp_sl_are_multipliers:
-        # incoming values are multipliers, e.g. 1.02, 0.995
-        try:
-            tp_price = 6900 * float(take_profit)
-        except:
-            tp_price = None
-
-        try:
-            sl_price = 6900 * float(stop_loss)
-        except:
-            sl_price = None
-
+    
+    tp_pct = float(take_profit) / 100.0
+    sl_pct = float(stop_loss) / 100.0
+    
+    if direction > 0:
+        # LONG
+        tp_price = ref_price * (1 + tp_pct)
+        sl_price = ref_price * (1 - sl_pct)
     else:
-        # incoming values are absolute prices (postopen restore)
-        tp_price = float(take_profit) if take_profit is not None else None
-        sl_price = float(stop_loss) if stop_loss is not None else None
+        # SHORT
+        tp_price = ref_price * (1 - tp_pct)
+        sl_price = ref_price * (1 + sl_pct)
+    
+    tp_price = round(tp_price, 2)
+    sl_price = round(sl_price, 2)
+
 
     log_step(acct, f"TP_PRICE: {tp_price}")
     log_step(acct, f"SL_PRICE: {sl_price}")
