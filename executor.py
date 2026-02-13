@@ -885,6 +885,118 @@ def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
 
 
 
+# def open_position_with_brackets(
+#     ib: IB,
+#     contract: Contract,
+#     direction: int,
+#     qty: int,
+#     take_profit: float | None,
+#     stop_loss: float | None,
+#     target_percentage: float | None,
+#     acct: int,
+#     tp_sl_are_multipliers: bool = True
+# ) -> None:
+
+#     if take_profit is None or stop_loss is None:
+#         if take_profit is None and stop_loss is None:
+#             log_step(acct, "OPEN_ENTRY_SKIPPED: TP and SL missing")
+#         elif take_profit is None:
+#             log_step(acct, "OPEN_ENTRY_SKIPPED: TP missing")
+#         else:
+#             log_step(acct, "OPEN_ENTRY_SKIPPED: SL missing")
+#         return
+
+#     action = "BUY" if direction > 0 else "SELL"
+
+#     # ----------------------------------------------------
+#     # MARKET PRICE (reference)
+#     # ----------------------------------------------------
+#     t = ib.reqMktData(contract, "", False, False)
+#     ref_price = None
+#     t0 = time.time()
+    
+#     while time.time() - t0 < 3:
+#         ib.waitOnUpdate(timeout=0.5)
+#         mp = t.marketPrice()
+#         if mp and mp > 0:
+#             ref_price = float(mp)
+#             break
+    
+#     ib.cancelMktData(contract)
+    
+#     if not ref_price:
+#         log_step(acct, "ENTRY_PRICE_FAIL: no market price")
+#         return
+    
+#     # ----------------------------------------------------
+#     # PERCENT → PRICE CONVERSION
+#     # ----------------------------------------------------
+    
+#     tp_pct = float(take_profit) / 100.0
+#     sl_pct = float(stop_loss) / 100.0
+    
+#     if direction > 0:
+#         # LONG
+#         tp_price = ref_price * (1 + tp_pct)
+#         sl_price = ref_price * (1 - sl_pct)
+#     else:
+#         # SHORT
+#         tp_price = ref_price * (1 - tp_pct)
+#         sl_price = ref_price * (1 + sl_pct)
+    
+#     tp_price = round(tp_price, 2)
+#     sl_price = round(sl_price, 2)
+
+
+#     log_step(acct, f"TP_PRICE: {tp_price}")
+#     log_step(acct, f"SL_PRICE: {sl_price}")
+
+#     exit_action = "SELL" if direction > 0 else "BUY"
+
+#     parent = MarketOrder(action, abs(int(qty)))
+
+#     tp_order = LimitOrder(exit_action, abs(int(qty)), tp_price)
+#     sl_order = StopOrder(exit_action, abs(int(qty)), sl_price)
+
+#     br = BracketOrder(parent, tp_order, sl_order)
+
+#     # ----------------------------------------------------
+#     # SUBMIT + FINAL STATES
+#     # ----------------------------------------------------
+#     bracket_lines = []
+#     bracket_lines.append(f"BRACKET SUBMIT: {contract.localSymbol} dir={action} qty={qty}")
+#     bracket_lines.append("-" * 40)
+
+#     trades = []
+
+#     for o in br:
+#         try:
+#             trade = ib.placeOrder(contract, o)
+#             trades.append(trade)
+#             bracket_lines.append(
+#                 f"SUBMIT: {o.orderType} {o.action} qty={o.totalQuantity}"
+#             )
+#         except Exception as e:
+#             bracket_lines.append(f"SUBMIT_FAIL: {e}")
+#             break
+
+#     ib.sleep(0.5)
+#     ib.waitOnUpdate(timeout=2)
+
+#     for t in trades:
+#         st = t.orderStatus
+#         bracket_lines.append(
+#             f"FINAL: orderId={t.order.orderId} type={t.order.orderType} "
+#             f"action={t.order.action} status={st.status} "
+#             f"filled={st.filled} remaining={st.remaining}"
+#         )
+
+#     bracket_lines.append("-" * 40)
+#     bracket_lines.append(f"PositionsAfter: {len(ib.positions())}")
+#     bracket_lines.append(f"TradesAfter:    {len(ib.openTrades())}")
+
+#     log_step(acct, "\n".join(bracket_lines))
+    
 def open_position_with_brackets(
     ib: IB,
     contract: Contract,
@@ -898,104 +1010,77 @@ def open_position_with_brackets(
 ) -> None:
 
     if take_profit is None or stop_loss is None:
-        if take_profit is None and stop_loss is None:
-            log_step(acct, "OPEN_ENTRY_SKIPPED: TP and SL missing")
-        elif take_profit is None:
-            log_step(acct, "OPEN_ENTRY_SKIPPED: TP missing")
-        else:
-            log_step(acct, "OPEN_ENTRY_SKIPPED: SL missing")
+        log_step(acct, "OPEN_ENTRY_SKIPPED: TP or SL missing")
         return
 
     action = "BUY" if direction > 0 else "SELL"
+    exit_action = "SELL" if direction > 0 else "BUY"
 
-    # ----------------------------------------------------
-    # MARKET PRICE (reference)
-    # ----------------------------------------------------
-    t = ib.reqMktData(contract, "", False, False)
-    ref_price = None
-    t0 = time.time()
-    
-    while time.time() - t0 < 3:
-        ib.waitOnUpdate(timeout=0.5)
-        mp = t.marketPrice()
-        if mp and mp > 0:
-            ref_price = float(mp)
+    # ------------------------------------------------
+    # 1️⃣ SEND MARKET PARENT ONLY
+    # ------------------------------------------------
+    parent = MarketOrder(action, abs(int(qty)))
+    trade = ib.placeOrder(contract, parent)
+
+    log_step(acct, "PARENT_ORDER_SUBMITTED")
+
+    # ------------------------------------------------
+    # 2️⃣ WAIT FOR FILL
+    # ------------------------------------------------
+    fill_price = None
+    timeout = time.time() + 10
+
+    while time.time() < timeout:
+        ib.waitOnUpdate(timeout=1)
+        if trade.fills:
+            fill_price = trade.fills[-1].execution.price
             break
-    
-    ib.cancelMktData(contract)
-    
-    if not ref_price:
-        log_step(acct, "ENTRY_PRICE_FAIL: no market price")
+
+    if not fill_price:
+        log_step(acct, "FILL_FAIL: parent not filled")
         return
-    
-    # ----------------------------------------------------
-    # PERCENT → PRICE CONVERSION
-    # ----------------------------------------------------
-    
+
+    log_step(acct, f"FILL_PRICE: {fill_price}")
+
+    # ------------------------------------------------
+    # 3️⃣ CALCULATE TP / SL FROM REAL FILL
+    # ------------------------------------------------
     tp_pct = float(take_profit) / 100.0
     sl_pct = float(stop_loss) / 100.0
-    
+
     if direction > 0:
-        # LONG
-        tp_price = ref_price * (1 + tp_pct)
-        sl_price = ref_price * (1 - sl_pct)
+        tp_price = fill_price * (1 + tp_pct)
+        sl_price = fill_price * (1 - sl_pct)
     else:
-        # SHORT
-        tp_price = ref_price * (1 - tp_pct)
-        sl_price = ref_price * (1 + sl_pct)
-    
+        tp_price = fill_price * (1 - tp_pct)
+        sl_price = fill_price * (1 + sl_pct)
+
     tp_price = round(tp_price, 2)
     sl_price = round(sl_price, 2)
-
 
     log_step(acct, f"TP_PRICE: {tp_price}")
     log_step(acct, f"SL_PRICE: {sl_price}")
 
-    exit_action = "SELL" if direction > 0 else "BUY"
-
-    parent = MarketOrder(action, abs(int(qty)))
-
+    # ------------------------------------------------
+    # 4️⃣ SEND OCO CHILD ORDERS
+    # ------------------------------------------------
     tp_order = LimitOrder(exit_action, abs(int(qty)), tp_price)
     sl_order = StopOrder(exit_action, abs(int(qty)), sl_price)
 
-    br = BracketOrder(parent, tp_order, sl_order)
+    ib.bracketOrder = None  # avoid confusion
 
-    # ----------------------------------------------------
-    # SUBMIT + FINAL STATES
-    # ----------------------------------------------------
-    bracket_lines = []
-    bracket_lines.append(f"BRACKET SUBMIT: {contract.localSymbol} dir={action} qty={qty}")
-    bracket_lines.append("-" * 40)
+    # OCA group
+    oca_group = f"OCA_{int(time.time()*1000)}"
+    tp_order.ocaGroup = oca_group
+    tp_order.ocaType = 1
+    sl_order.ocaGroup = oca_group
+    sl_order.ocaType = 1
 
-    trades = []
+    ib.placeOrder(contract, tp_order)
+    ib.placeOrder(contract, sl_order)
 
-    for o in br:
-        try:
-            trade = ib.placeOrder(contract, o)
-            trades.append(trade)
-            bracket_lines.append(
-                f"SUBMIT: {o.orderType} {o.action} qty={o.totalQuantity}"
-            )
-        except Exception as e:
-            bracket_lines.append(f"SUBMIT_FAIL: {e}")
-            break
+    log_step(acct, "BRACKET_CHILDREN_SUBMITTED")
 
-    ib.sleep(0.5)
-    ib.waitOnUpdate(timeout=2)
-
-    for t in trades:
-        st = t.orderStatus
-        bracket_lines.append(
-            f"FINAL: orderId={t.order.orderId} type={t.order.orderType} "
-            f"action={t.order.action} status={st.status} "
-            f"filled={st.filled} remaining={st.remaining}"
-        )
-
-    bracket_lines.append("-" * 40)
-    bracket_lines.append(f"PositionsAfter: {len(ib.positions())}")
-    bracket_lines.append(f"TradesAfter:    {len(ib.openTrades())}")
-
-    log_step(acct, "\n".join(bracket_lines))
 
 
 
