@@ -1450,6 +1450,8 @@ def execute_signal_for_account(acc: AccountSpec, sig: Signal, settings: Settings
     #logger.info(f"[EXEC] Start acct={acc.account_number} port={acc.api_port} client_id={acc.client_id} alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty}")
     # log_step(acc.account_number,
     #      f"EXEC_START alert={sig.raw_alert} symbol={sig.symbol} dir=SELL if {sig.desired_direction==-1} else 'BUY' qty={sig.desired_qty}")
+    log_step(acc.account_number, f"DEBUG acct={acc.account_number} port={acc.api_port} clientId={acc.client_id}")
+
     log_step(
         acc.account_number,
         f"EXEC_START alert={sig.raw_alert} "
