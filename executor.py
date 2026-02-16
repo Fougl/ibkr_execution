@@ -1078,8 +1078,14 @@ def open_position_with_brackets(
 
     ib.placeOrder(contract, tp_order)
     ib.placeOrder(contract, sl_order)
+    ib.sleep(0.5)
+    ib.waitOnUpdate(timeout=2)
 
     log_step(acct, "BRACKET_CHILDREN_SUBMITTED")
+    log_step(acct, f"PositionsAfter: {len(ib.positions())}")
+    log_step(acct, f"TradesAfter:    {len(ib.openTrades())}")
+
+
 
 
 
