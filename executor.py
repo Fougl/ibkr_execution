@@ -1587,7 +1587,7 @@ def execute_signal_for_account(acc: AccountSpec, ib: IB,  sig: Signal, settings:
     try:
         
 
-
+        logger.info(f"one")
         contract = build_contract(sig)
         # Qualify contract and detect ambiguity
         qualified = ib.qualifyContracts(contract)
@@ -1616,7 +1616,7 @@ def execute_signal_for_account(acc: AccountSpec, ib: IB,  sig: Signal, settings:
 
 
         qty = current_position_qty(ib, contract)
-        
+        logger.info(f"two")
         log_step(acc.short_name, "#############STATE CHECK######################")
         if qty != 0:
             side = "BUY" if qty > 0 else "SELL"
