@@ -1599,6 +1599,10 @@ def execute_signal_for_account(acc: AccountSpec, ib: IB,  sig: Signal, settings:
                 f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                 f"qualified_count={len(qualified)}"
             )
+            logger.info( 
+                f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                f"qualified_count={len(qualified)}"
+            )
             #logger.info(f"[IB] Disconnect acct={acc.short_name} port={acc.api_port} client_id={acc.client_id}")
             #ib.disconnect()
             result.update({
