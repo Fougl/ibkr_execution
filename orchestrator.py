@@ -299,10 +299,20 @@ def reconcile_ibkr_secrets(
 
             resp = sm.get_secret_value(SecretId=name)
             secret = json.loads(resp["SecretString"])
-
+            
+            ok, reason = validate_secret_json(name, secret)
+            if not ok:
+                logger.error(
+                    "Invalid secret JSON during reconcile; ignoring: %s reason=%s",
+                    name,
+                    reason,
+                )
+                continue  # <-- DO NOT add to state
+            
             new_state[name] = {
                 "fingerprint": fingerprint_secret(secret),
             }
+
 
 
     old_keys = set(old_state.keys())
