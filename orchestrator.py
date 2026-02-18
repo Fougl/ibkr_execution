@@ -38,7 +38,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Set
 import subprocess
 from pathlib import Path
-from ib_insync import IB
 
 # ----------------------------
 # Defaults
@@ -185,43 +184,50 @@ class SecretSpec:
 
 
 def validate_secret_json(secret_name: str, d: Dict[str, Any]) -> Tuple[bool, str]:
-    """
-    Minimal schema check:
-      Required (case-sensitive):
-        - IbLoginId (str)
-        - IbPassword (str)
-        - TradingMode (str: live|paper or similar)
-        - CommandServerPort (int or str-int)
-    Optional keys used by health check / runtime:
-        - ApiPort (int) OR TWSApiPort (int) OR TwsApiPort (int)
-        - Host (default 127.0.0.1)
-        - ClientId (default 0)
-    """
-    required = ["account_number", "username", "password", "account_type"]
+    required = ["active", "username", "password", "account_type", "2fa_time"]
     missing = [k for k in required if k not in d]
     if missing:
         return False, f"Missing required keys: {missing}"
 
-    if not str(d["account_number"]).strip().isdigit():
-        return False, "account_number must be numeric"
+    # active
+    if str(d["active"]) not in {"0", "1"}:
+        return False, "active must be '0' or '1'"
+
+    # username
     if not isinstance(d["username"], str) or not d["username"].strip():
         return False, "username must be a non-empty string"
+
+    # password
     if not isinstance(d["password"], str) or not d["password"].strip():
         return False, "password must be a non-empty string"
-    if not isinstance(d.get("account_type"), str) or d["account_type"].strip().lower() not in {"live", "paper"}:
+
+    # account_type
+    if str(d["account_type"]).strip().lower() not in {"live", "paper"}:
         return False, "account_type must be 'live' or 'paper'"
 
+    # 2fa_time format HH:MM
+    if not isinstance(d["2fa_time"], str) or not re.match(r"^\d{2}:\d{2}$", d["2fa_time"]):
+        return False, "2fa_time must be in HH:MM format"
 
     return True, "OK"
 
 
-def render_config_ini(secret) -> str:
+def derive_id_from_name(name: str) -> int:
+    """
+    Deterministically derive a small numeric ID from short_name.
+    Stable across restarts.
+    """
+    h = hashlib.sha256(name.encode()).hexdigest()
+    return int(h[:6], 16) % 1000
+
+def render_config_ini(secret: Dict[str, Any], short_name: str) -> str:
     """
     Render IBKR IBC config.ini exactly as required.
     """
+    derived_id = derive_id_from_name(short_name)
 
-    command_server_port = 7462 + int(secret["account_number"])
-    twsapi_port = 4002 + int(secret["account_number"])
+    command_server_port = 7462 + derived_id
+    twsapi_port = 4002 + derived_id
 
     return f"""IbLoginId={secret["username"]}
 IbPassword={secret["password"]}
@@ -243,8 +249,7 @@ BypassPriceBasedVolatilityRiskWarning=yes
 BypassUSStocksMarketDataInSharesWarning=yes
 BypassRedirectOrderWarning=yes
 BypassNoOverfillProtectionPrecaution=yes
-AutoRestartTime=10:00 PM
-ColdRestartTime=15:00
+AutoRestartTime={secret.get("2fa_time", "10:00 PM")}
 AcceptIncomingConnectionAction=reject
 CommandServerPort={command_server_port}
 OverrideTwsApiPort={twsapi_port}
@@ -295,19 +300,10 @@ def reconcile_ibkr_secrets(
             resp = sm.get_secret_value(SecretId=name)
             secret = json.loads(resp["SecretString"])
 
-            # --- derive account_id and IBC port deterministically ---
-            raw_account = secret["account_number"]
-            if isinstance(raw_account, str):
-                account_id = int("".join(filter(str.isdigit, raw_account)))
-            else:
-                account_id = int(raw_account)
-
-            ibc_port = 7462 + account_id
-
             new_state[name] = {
                 "fingerprint": fingerprint_secret(secret),
-                "ibc_port": ibc_port,
             }
+
 
     old_keys = set(old_state.keys())
     new_keys = set(new_state.keys())
@@ -394,110 +390,50 @@ def run_script(script_path: str, env: dict) -> subprocess.Popen:
     )
 
 
-def stop_account_best_effort(accounts_base: str, account_id: str) -> None:
-    """
-    Phase-1 safe-ish stop:
-    - if we recorded a pid in runtime.json, send SIGTERM
-    Otherwise just log. (IBC scripts vary; stopping cleanly is Phase 2.)
-    """
-    rt = load_runtime(accounts_base, account_id)
-    pid = rt.get("pid")
-    if not pid:
-        logger.warning("No pid recorded for account_id=%s; cannot stop automatically", account_id)
-        return
-    try:
-        os.kill(int(pid), signal.SIGTERM)
-        logger.info("Sent SIGTERM to pid=%s account_id=%s", pid, account_id)
-    except Exception as e:
-        logger.warning("Failed to stop pid=%s account_id=%s: %s", pid, account_id, e)
 
-
-
-
-def wait_for_ib_api(
-    host: str,
-    port: int,
-    client_id: int,
-    timeout: int = 5,
-    max_wait: int = 20,
-):
-    """
-    Wait up to max_wait seconds for IB Gateway API to become available.
-    Returns (ok: bool, message: str)
-    """
-    deadline = time.time() + max_wait
-    last_error = None
-    time.sleep(max_wait)
-    #while True:
-    ib = IB()
-    try:
-        ib.connect(
-            host=host,
-            port=port,
-            clientId=client_id,
-            timeout=timeout,
-        )
-
-        # This is the REAL test: API + account access
-        summary = ib.accountSummary()
-        if summary:
-            ib.disconnect()
-            return True, "IB API reachable, account summary received"
-
-        ib.disconnect()
-        #break
-
-    except Exception as e:
-        last_error = str(e)
-
-        time.sleep(2)
-
-    return False, f"IB API not reachable after {max_wait}s ({last_error})"
-# ----------------------------
-# Account apply logic
-# ----------------------------
 
 def apply_account_added(args, secret_name: str) -> None:
-    #account_id = account_id_from_secret_name(secret_name)
     secret = load_secret(args.region, secret_name)
-    account_id = int(secret['account_number'])
 
     ok, reason = validate_secret_json(secret_name, secret)
     if not ok:
-        logger.error("Invalid secret JSON; skipping start: %s reason=%s", secret_name, reason)
+        logger.error(
+            "Invalid secret JSON; skipping start: %s reason=%s",
+            secret_name,
+            reason,
+        )
+        return
+    if str(secret["active"]) != "1":
+        logger.info(
+            "Secret %s inactive (active=0), skipping start",
+            secret_name,
+        )
         return
 
-    paths = build_account_paths(args.accounts_base, str(account_id))
+
+    short_name = short_name_from_secret_name(secret_name)
+
+    paths = build_account_paths(args.accounts_base, short_name)
     os.makedirs(paths["base_dir"], exist_ok=True)
 
     # Write config.ini
-    cfg = render_config_ini(secret)
+    cfg = render_config_ini(secret, short_name)
     with open(paths["config_ini"], "w", encoding="utf-8") as f:
         f.write(cfg)
 
+    # Derive port
+    derived_id = derive_id_from_name(short_name)
+    command_port = 7462 + derived_id
+
     env = build_env(args.display, paths)
+    env["COMMAND_SERVER_PORT"] = str(command_port)
 
-    # Start gateway
-    p = run_script(GATEWAY_START, env)
+    run_script(GATEWAY_START, env)
+
     
-    time.sleep(30)  # small initial delay so Java can start
-
-    ok, msg = wait_for_ib_api(
-        host="127.0.0.1",
-        port=4002 + account_id,   # your rule
-        client_id=1,
-        max_wait=20,
-    )
     
-    if ok:
-        logger.info("Gateway ready for %s: %s", secret_name, msg)
-    else:
-        logger.error("Gateway FAILED for %s: %s", secret_name, msg)
     
-
-
 def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
-    #account_id = account_id_from_secret_name(secret_name)
     entry = old_state.get(secret_name)
     if not entry:
         logger.warning(
@@ -505,54 +441,83 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
             secret_name,
         )
         return
+    
+
+    # Extract short_name from secret name
+    short_name = short_name_from_secret_name(secret_name)
+
     secret = load_secret(args.region, secret_name)
-    account_id = int(secret['account_number'])
+    
+    
 
     ok, reason = validate_secret_json(secret_name, secret)
     if not ok:
-        logger.error("Invalid secret JSON; skipping restart: %s reason=%s", secret_name, reason)
+        logger.error(
+            "Invalid secret JSON; skipping restart: %s reason=%s",
+            secret_name,
+            reason,
+        )
+        return
+    
+    if str(secret["active"]) != "1":
+        logger.info(
+            "Secret %s inactive (active=0), stopping gateway",
+            secret_name,
+        )
+    
+        #short_name = short_name_from_secret_name(secret_name)
+        derived_id = derive_id_from_name(short_name)
+        command_port = 7462 + derived_id
+    
+        env = os.environ.copy()
+        env["COMMAND_SERVER_PORT"] = str(command_port)
+    
+        subprocess.run(
+            [GATEWAY_STOP],
+            env=env,
+            check=False,
+        )
         return
 
-    paths = build_account_paths(args.accounts_base, str(account_id))
+    # Build paths using short_name (NOT account_number)
+    paths = build_account_paths(args.accounts_base, short_name)
     os.makedirs(paths["base_dir"], exist_ok=True)
 
     # Rewrite config.ini
-    cfg = render_config_ini(secret)
+    cfg = render_config_ini(secret, short_name)
     with open(paths["config_ini"], "w", encoding="utf-8") as f:
         f.write(cfg)
 
-    env = build_env(args.display, paths)
-
-    # Restart gateway
-    p = run_script(GATEWAY_RESTART, env)
-    
-    ibc_port = entry["ibc_port"]
+    # Derive deterministic port (NOT from state)
+    derived_id = derive_id_from_name(short_name)
+    command_port = 7462 + derived_id
 
     logger.warning(
         "Secret changed: %s -> restarting IBC on port %s (Phase 1)",
         secret_name,
-        ibc_port,
+        command_port,
     )
 
-    env = os.environ.copy()
-    env["COMMAND_SERVER_PORT"] = str(ibc_port)
-    
-    time.sleep(5)  # small initial delay so Java can start
+    # Build env AND set COMMAND_SERVER_PORT BEFORE restart
+    env = build_env(args.display, paths)
+    env["COMMAND_SERVER_PORT"] = str(command_port)
 
-    ok, msg = wait_for_ib_api(
-        host="127.0.0.1",
-        port=4002 + account_id,   # your rule
-        client_id=1,
-        max_wait=20,
-    )
-    
-    if ok:
-        logger.info("Gateway ready for %s: %s", secret_name, msg)
-    else:
-        logger.error("Gateway FAILED for %s: %s", secret_name, msg)
+    # Restart gateway
+    run_script(GATEWAY_RESTART, env)
 
     
+    
+def short_name_from_secret_name(secret_name: str) -> str:
+    """
+    Extract short_name from secret name.
+    Expected format: ibkr/short_name
+    """
+    parts = secret_name.split("/")
+    if len(parts) != 2 or not parts[1]:
+        raise ValueError(f"Invalid secret name format: {secret_name}. Expected ibkr/short_name")
+    return parts[1]
 
+    
 
 def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
     entry = old_state.get(secret_name)
@@ -564,22 +529,29 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
         )
         return
 
-    ibc_port = entry["ibc_port"]
+    # Derive short_name from secret name
+    short_name = short_name_from_secret_name(secret_name)
+
+    # Deterministic port derivation (same logic as config)
+    derived_id = derive_id_from_name(short_name)
+    command_port = 7462 + derived_id  # <-- FIXED base port
 
     logger.warning(
         "Secret removed: %s -> stopping IBC on port %s (Phase 1)",
         secret_name,
-        ibc_port,
+        command_port,
     )
 
     env = os.environ.copy()
-    env["COMMAND_SERVER_PORT"] = str(ibc_port)
+    env["COMMAND_SERVER_PORT"] = str(command_port)
 
     subprocess.run(
-        ["/opt/ibc/stop.sh"],
+        [GATEWAY_STOP],
         env=env,
         check=False,
     )
+
+
 
 def force_start_or_restart_all_secrets(args) -> None:
     sm = boto3.client("secretsmanager", region_name=args.region)
@@ -597,36 +569,48 @@ def force_start_or_restart_all_secrets(args) -> None:
                 logger.info("Ensuring gateway for secret=%s", secret_name)
 
                 secret = load_secret(args.region, secret_name)
-                account_id = int(secret["account_number"])
 
                 ok, reason = validate_secret_json(secret_name, secret)
                 if not ok:
                     logger.error("Invalid secret %s: %s", secret_name, reason)
                     continue
 
-                paths = build_account_paths(args.accounts_base, str(account_id))
+                # Respect active flag
+                if str(secret["active"]) != "1":
+                    logger.info(
+                        "Secret %s inactive (active=0), skipping",
+                        secret_name,
+                    )
+                    continue
+
+                # Extract short_name from secret name
+                short_name = short_name_from_secret_name(secret_name)
+
+                # Build paths
+                paths = build_account_paths(args.accounts_base, short_name)
                 os.makedirs(paths["base_dir"], exist_ok=True)
 
-                # Always rewrite config
-                cfg = render_config_ini(secret)
+                # Always rewrite config.ini
+                cfg = render_config_ini(secret, short_name)
                 with open(paths["config_ini"], "w", encoding="utf-8") as f:
                     f.write(cfg)
 
-                # Build FULL env (this is critical)
-                env = build_env(args.display, paths)
-                env["COMMAND_SERVER_PORT"] = str(7462 + account_id)
+                # Derive deterministic port
+                derived_id = derive_id_from_name(short_name)
+                command_port = 7462 + derived_id
 
-                # Try start
+                # Build environment
+                env = build_env(args.display, paths)
+                env["COMMAND_SERVER_PORT"] = str(command_port)
+
+                # Start gateway
                 p = subprocess.Popen(
                     [GATEWAY_START],
                     env=env,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    #text=True,
                     start_new_session=True,
                 )
-
-                #out = (p.stdout or "").lower()
 
                 logger.info(
                     "Gateway start triggered for %s (pid=%s)",
@@ -634,18 +618,9 @@ def force_start_or_restart_all_secrets(args) -> None:
                     p.pid,
                 )
 
-                #     subprocess.run(
-                #         [GATEWAY_RESTART],
-                #         env=env,
-                #         stdout=subprocess.DEVNULL,
-                #         stderr=subprocess.DEVNULL,
-                #         check=False,
-                #     )
-                # else:
-                #     logger.info("Gateway start attempted for %s", secret_name)
-
             except Exception:
                 log_exception("Failed force start/restart", secret=secret_name)
+
 # ----------------------------
 # Main
 # ----------------------------
