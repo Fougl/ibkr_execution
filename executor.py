@@ -1548,6 +1548,7 @@ def execute_signal_for_account(acc: AccountSpec, ib: IB,  sig: Signal, settings:
     #logger.info(f"[EXEC] Start acct={acc.short_name} port={acc.api_port} client_id={acc.client_id} alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty}")
     # log_step(acc.short_name,
     #      f"EXEC_START alert={sig.raw_alert} symbol={sig.symbol} dir=SELL if {sig.desired_direction==-1} else 'BUY' qty={sig.desired_qty}")
+    logger.info(f"tuiilelee")
     if not ib.isConnected():
         log_step(acc.short_name, "IB_NOT_CONNECTED")
         flush_account_log(acc.short_name, "WEBHOOK_EXEC")
@@ -2134,11 +2135,11 @@ def webhook() -> Any:
             futs = []
         
             for short_name, (acc, ib) in connections:
-                logger.info(f"tuiilelee")
+                #logger.info(f"tuiilelee")
                 if not ib.isConnected():
                     logger.info(f"[ALARM] Connection lost for {short_name}")
                     continue
-                logger.info(f"tuiilelee")
+                
                 futs.append(
                     pool.submit(
                         execute_signal_for_account,
