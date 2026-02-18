@@ -2138,7 +2138,7 @@ def webhook() -> Any:
                 if not ib.isConnected():
                     logger.info(f"[ALARM] Connection lost for {short_name}")
                     continue
-        
+                logger.info(f"tuiilelee")
                 futs.append(
                     pool.submit(
                         execute_signal_for_account,
