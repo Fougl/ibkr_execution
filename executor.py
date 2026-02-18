@@ -1587,7 +1587,7 @@ def execute_signal_for_account(acc: AccountSpec, ib: IB,  sig: Signal, settings:
     try:
         
 
-        logger.info(f"{sig.symbol}  {sig.exchange}")
+        logger.info(f"{ib.positions()}")
         contract = build_contract(sig)
         # Qualify contract and detect ambiguity
         qualified = ib.qualifyContracts(contract)
