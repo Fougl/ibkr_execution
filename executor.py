@@ -73,7 +73,7 @@ STATE_PATH = os.getenv("EXECUTOR_STATE_PATH", "/opt/ibc/execution/executor_state
 # DDB_TABLE = os.getenv("DDB_TABLE", "ankro-global-settings")
 # DDB_PK = os.getenv("DDB_PK", "GLOBAL")
 # DDB_SK = os.getenv("DDB_SK", "SETTINGS")
-SETTINGS_CACHE_TTL_SEC = int(os.getenv("SETTINGS_CACHE_TTL_SEC", "10"))
+SETTINGS_CACHE_TTL_SEC = int(os.getenv("SETTINGS_CACHE_TTL_SEC", "240"))
 
 # Secrets Manager
 SECRETS_FILTER_SUBSTRING = os.getenv("SECRETS_FILTER_SUBSTRING", "ibkr")
@@ -424,7 +424,7 @@ def list_ibkr_accounts() -> List[AccountSpec]:
     
     # sm = boto3.client("secretsmanager", region_name=region)
     
-    logger.info(f"[SECRETS] Listing accounts region={REGION} filter='{SECRETS_FILTER_SUBSTRING}'")
+    #logger.info(f"[SECRETS] Listing accounts region={REGION} filter='{SECRETS_FILTER_SUBSTRING}'")
 
     sm = boto3.client("secretsmanager", region_name=REGION)
 
@@ -465,7 +465,7 @@ def list_ibkr_accounts() -> List[AccountSpec]:
 
     # deterministic order
     accounts.sort(key=lambda a: a.short_name)
-    logger.info(f"[SECRETS] Accounts loaded count={len(accounts)}")
+    #logger.info(f"[SECRETS] Accounts loaded count={len(accounts)}")
     return accounts
 
 
@@ -2008,14 +2008,42 @@ def connection_manager_loop():
             with IB_CONN_LOCK:
                 for short in list(IB_CONNECTIONS.keys()):
                     if short not in active_names:
-                        logger.info(f"[CONN] Removing inactive {short}")
+                        logger.info(f"[CONN] Removing inactive {short} — flattening first")
+                    
                         try:
-                            _, ib = IB_CONNECTIONS[short]
-                            ib.disconnect()
+                            acc, ib = IB_CONNECTIONS[short]
+                    
+                            if ib.isConnected():
+                                # Reuse your existing logic
+                                try:
+                                    cancel_all_open_orders(ib, reason="secret_removed", acct=short)
+                                except Exception as e:
+                                    logger.info(f"[ALARM] Cancel failed for {short}: {e}")
+                    
+                                try:
+                                    positions = ib.positions()
+                                    for p in positions:
+                                        qty = int(p.position)
+                                        if qty != 0:
+                                            action = "SELL" if qty > 0 else "BUY"
+                                            ib.placeOrder(p.contract, MarketOrder(action, abs(qty)))
+                                except Exception as e:
+                                    logger.info(f"[ALARM] Flatten failed for {short}: {e}")
+                    
+                                ib.sleep(1.0)
+                                ib.waitOnUpdate(timeout=3)
+                    
+                        except Exception as e:
+                            logger.info(f"[ALARM] Error during forced flatten of {short}: {e}")
+                    
+                        finally:
+                            try:
+                                ib.disconnect()
+                            except:
+                                pass
+                    
+                            del IB_CONNECTIONS[short]
 
-                        except:
-                            pass
-                        del IB_CONNECTIONS[short]
 
         except Exception as e:
             logger.exception(f"[CONN] Manager error: {e}")

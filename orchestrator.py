@@ -461,7 +461,7 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     
     if str(secret["active"]) != "1":
         logger.info(
-            "Secret %s inactive (active=0), stopping gateway",
+            "Secret %s inactive (active=0), stopping gateway, this will take 5 minutes",
             secret_name,
         )
     
@@ -471,7 +471,7 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     
         env = os.environ.copy()
         env["COMMAND_SERVER_PORT"] = str(command_port)
-    
+        time.sleep(300)
         subprocess.run(
             [GATEWAY_STOP],
             env=env,
@@ -540,14 +540,14 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
     command_port = 7462 + derived_id  # <-- FIXED base port
 
     logger.warning(
-        "Secret removed: %s -> stopping IBC on port %s (Phase 1)",
+        "Secret removed: %s -> stopping IBC on port %s (Phase 1) - this will take 5 minutes",
         secret_name,
         command_port,
     )
 
     env = os.environ.copy()
     env["COMMAND_SERVER_PORT"] = str(command_port)
-
+    time.sleep(300)
     subprocess.run(
         [GATEWAY_STOP],
         env=env,
