@@ -299,20 +299,10 @@ def reconcile_ibkr_secrets(
 
             resp = sm.get_secret_value(SecretId=name)
             secret = json.loads(resp["SecretString"])
-            
-            ok, reason = validate_secret_json(name, secret)
-            if not ok:
-                logger.error(
-                    "Invalid secret JSON during reconcile; ignoring: %s reason=%s",
-                    name,
-                    reason,
-                )
-                continue  # <-- DO NOT add to state
-            
+
             new_state[name] = {
                 "fingerprint": fingerprint_secret(secret),
             }
-
 
 
     old_keys = set(old_state.keys())
@@ -513,7 +503,10 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     env["COMMAND_SERVER_PORT"] = str(command_port)
 
     # Restart gateway
+       
     run_script(GATEWAY_RESTART, env)
+    time.sleep(20)
+    run_script(GATEWAY_START, env)
 
     
     
