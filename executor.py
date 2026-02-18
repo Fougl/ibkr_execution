@@ -883,7 +883,7 @@ def close_position(ib: IB, contract: Contract, qty: int, acct: int) -> None:
     # More robust wait loop: IB updates positions asynchronously
     for i in range(15):      # ~15 seconds worst-case
         ib.waitOnUpdate(timeout=1.0)   # consume API messages
-        time.sleep(0.2)
+        ib.sleep(0.2)
 
         # Force refresh from IB — important!
         ib.reqPositions()
@@ -1175,7 +1175,7 @@ def wait_until_flat(ib: IB, contract: Contract, settings: Settings) -> bool:
             return True
         #logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
         ib.sleep(0.1)
-        time.sleep(1)
+        #time.sleep(1)
     return False
 
 
@@ -1964,7 +1964,7 @@ def background_scheduler_loop():
         except Exception as e:
             logger.exception(f"Scheduler error: {e}")
 
-        time.sleep(20)
+        #time.sleep(20)
         
 def connection_manager_loop():
     logger.info("Connection manager started")
@@ -2057,7 +2057,7 @@ def connection_manager_loop():
         except Exception as e:
             logger.exception(f"[CONN] Manager error: {e}")
 
-        time.sleep(10)
+        #time.sleep(10)
         
 def start_connection_manager():
     t = threading.Thread(target=connection_manager_loop, daemon=True)
