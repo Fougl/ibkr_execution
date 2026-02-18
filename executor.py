@@ -1891,7 +1891,7 @@ def execute_signal_for_account(acc: AccountSpec, ib: IB,  sig: Signal, settings:
         return result
 
     except Exception as e:
-        logger.info("error: {str(e)}")
+        #logger.info("error: {str(e)}")
         result.update({"ok": False, "error": str(e)})
         flush_account_log(acc.short_name, "WEBHOOK_EXEC")
         return result
