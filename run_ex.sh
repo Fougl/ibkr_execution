@@ -1,5 +1,6 @@
 echo ">>> Checking for running WAITRESS"
-WPID=$(ps aux | grep "[w]aitress-serve --host=0.0.0.0 --port=5001 executor:app" | awk '{print $2}' || true)
+WPID=$(ps aux | grep "[w]aitress-serve --host=0.0.0.0 --port=${EXECUTOR_PORT} executor:app" | awk '{print $2}' || true)
+
 
 if [ -n "$WPID" ]; then
     echo ">>> Killing old Waitress PID: $WPID"
@@ -24,7 +25,8 @@ echo ">>> Starting EXECUTOR (scheduler + IBKR logic)"
 nohup /home/ubuntu/venv/bin/python3 /opt/ibc/execution/executor.py > /opt/ibc/execution/executor.log 2>&1 &
 
 echo ">>> Starting WAITRESS (webhook API only)"
-nohup /home/ubuntu/venv/bin/waitress-serve --host=0.0.0.0 --port=5001 executor:app > /opt/ibc/execution/waitress.log 2>&1 &
+nohup /home/ubuntu/venv/bin/waitress-serve --host=0.0.0.0 --port=${EXECUTOR_PORT} executor:app > /opt/ibc/execution/waitress.log 2>&1 &
+
 
 sleep 1
 

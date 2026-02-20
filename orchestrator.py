@@ -38,6 +38,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Set
 import subprocess
 from pathlib import Path
+import urllib.request  # <--- added for HTTP calls to executor
+from flask import Flask, request, jsonify
+import threading
+
 
 # ----------------------------
 # Defaults
@@ -130,13 +134,85 @@ def fingerprint_secret(secret: dict) -> str:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
-
 def ensure_dir_writable(path: str) -> None:
     os.makedirs(path, exist_ok=True)
     testfile = os.path.join(path, ".write_test")
     with open(testfile, "w", encoding="utf-8") as f:
         f.write("ok")
     os.unlink(testfile)
+
+
+# ----------------------------
+# HTTP helpers to talk to executor
+# ----------------------------
+def http_post_json(url: str, payload: dict, timeout: float = 10.0) -> bool:
+    """
+    Send JSON POST. Returns True if 2xx response, False otherwise.
+    """
+    if not url:
+        logger.warning("HTTP POST skipped, empty URL")
+        return False
+
+    try:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", None)
+            body = resp.read().decode("utf-8", "ignore")
+            logger.info("HTTP POST to %s status=%s body=%s", url, status, body[:200])
+            return 200 <= (status or 0) < 300
+
+    except Exception:
+        log_exception("HTTP POST failed", url=url)
+        return False
+
+def forward_webhook_to_executor(executor_url: str, payload: dict) -> bool:
+    """
+    Forward payload to one executor.
+    Returns True on success, False on failure.
+    """
+    if not executor_url:
+        logger.warning("Executor URL missing; skipping")
+        return False
+
+    logger.info("Forwarding webhook to executor: %s", executor_url)
+    return http_post_json(executor_url, payload)
+
+
+def flatten_account_positions(flatten_url: str, account_short_name: str) -> None:
+    """
+    Ask executor to close all positions for a given account before we stop its gateway.
+    """
+    if not flatten_url:
+        logger.warning(
+            "Executor flatten URL not set; skipping flatten for account %s",
+            account_short_name,
+        )
+        return
+
+    payload = {"account": account_short_name}
+    logger.warning(
+        "Requesting executor to flatten positions for account=%s",
+        account_short_name,
+    )
+    http_post_json(flatten_url, payload, timeout=20.0)
+    
+def forward_to_all_executors(payload: dict):
+    active_accounts = get_active_executor_shortnames()
+    for short_name in active_accounts:
+        try:
+            derived_id = derive_id_from_name(short_name)
+            port = 5001 + derived_id
+            url = f"http://127.0.0.1:{port}/webhook"
+            forward_webhook_to_executor(url, payload)
+        except Exception:
+            logger.exception(f"Failed forwarding webhook to executor {short_name}")
+
 
 
 # ----------------------------
@@ -220,6 +296,7 @@ def derive_id_from_name(name: str) -> int:
     h = hashlib.sha256(name.encode()).hexdigest()
     return int(h[:6], 16) % 1000
 
+
 def render_config_ini(secret: Dict[str, Any], short_name: str) -> str:
     """
     Render IBKR IBC config.ini exactly as required.
@@ -254,7 +331,6 @@ AcceptIncomingConnectionAction=reject
 CommandServerPort={command_server_port}
 OverrideTwsApiPort={twsapi_port}
 """
-
 
 
 # ----------------------------
@@ -303,7 +379,6 @@ def reconcile_ibkr_secrets(
             new_state[name] = {
                 "fingerprint": fingerprint_secret(secret),
             }
-
 
     old_keys = set(old_state.keys())
     new_keys = set(new_state.keys())
@@ -390,8 +465,6 @@ def run_script(script_path: str, env: dict) -> subprocess.Popen:
     )
 
 
-
-
 def apply_account_added(args, secret_name: str) -> None:
     secret = load_secret(args.region, secret_name)
 
@@ -409,7 +482,6 @@ def apply_account_added(args, secret_name: str) -> None:
             secret_name,
         )
         return
-
 
     short_name = short_name_from_secret_name(secret_name)
 
@@ -429,10 +501,11 @@ def apply_account_added(args, secret_name: str) -> None:
     env["COMMAND_SERVER_PORT"] = str(command_port)
 
     run_script(GATEWAY_START, env)
+    broker = broker_from_secret_name(secret_name)
+    ensure_executor_service(broker, short_name)
 
-    
-    
-    
+
+
 def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     entry = old_state.get(secret_name)
     if not entry:
@@ -441,14 +514,11 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
             secret_name,
         )
         return
-    
 
     # Extract short_name from secret name
     short_name = short_name_from_secret_name(secret_name)
 
     secret = load_secret(args.region, secret_name)
-    
-    
 
     ok, reason = validate_secret_json(secret_name, secret)
     if not ok:
@@ -458,17 +528,21 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
             reason,
         )
         return
-    
+
     if str(secret["active"]) != "1":
         logger.info(
             "Secret %s inactive (active=0), stopping gateway, this will take 5 minutes",
             secret_name,
         )
-    
-        #short_name = short_name_from_secret_name(secret_name)
+
+        # BEFORE stopping gateway → ask executor to flatten all positions
+        flatten_account_positions(args.executor_flatten_url, short_name)
+        stop_and_remove_executor_service(short_name)
+
+
         derived_id = derive_id_from_name(short_name)
         command_port = 7462 + derived_id
-    
+
         env = os.environ.copy()
         env["COMMAND_SERVER_PORT"] = str(command_port)
         time.sleep(300)
@@ -503,13 +577,13 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     env["COMMAND_SERVER_PORT"] = str(command_port)
 
     # Restart gateway
-       
     run_script(GATEWAY_RESTART, env)
     time.sleep(20)
     run_script(GATEWAY_START, env)
+    broker = broker_from_secret_name(secret_name)
+    ensure_executor_service(broker, short_name)
 
-    
-    
+
 def short_name_from_secret_name(secret_name: str) -> str:
     """
     Extract short_name from secret name.
@@ -520,7 +594,19 @@ def short_name_from_secret_name(secret_name: str) -> str:
         raise ValueError(f"Invalid secret name format: {secret_name}. Expected ibkr/short_name")
     return parts[1]
 
-    
+def broker_from_secret_name(secret_name: str) -> str:
+    """
+    Extract broker name from secret name.
+    Format: <broker>/<short_name>
+    Example:
+        ibkr/acc001 -> broker="ibkr"
+        binance/acc002 -> broker="binance"
+    """
+    parts = secret_name.split("/")
+    if len(parts) != 2 or not parts[0]:
+        raise ValueError(f"Invalid secret name: {secret_name}")
+    return parts[0]
+
 
 def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
     entry = old_state.get(secret_name)
@@ -534,6 +620,11 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
 
     # Derive short_name from secret name
     short_name = short_name_from_secret_name(secret_name)
+
+    # BEFORE stopping gateway → ask executor to flatten all positions
+    flatten_account_positions(args.executor_flatten_url, short_name)
+    stop_and_remove_executor_service(short_name)
+
 
     # Deterministic port derivation (same logic as config)
     derived_id = derive_id_from_name(short_name)
@@ -553,7 +644,8 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
         env=env,
         check=False,
     )
-
+    broker = broker_from_secret_name(secret_name)
+    ensure_executor_service(broker, short_name)
 
 
 def force_start_or_restart_all_secrets(args) -> None:
@@ -624,6 +716,83 @@ def force_start_or_restart_all_secrets(args) -> None:
             except Exception:
                 log_exception("Failed force start/restart", secret=secret_name)
 
+def get_active_executor_shortnames() -> list[str]:
+    services = []
+    path = "/etc/systemd/system"
+
+    for f in os.listdir(path):
+        if f.startswith("ibkr-executor-") and f.endswith(".service"):
+            short = f[len("ibkr-executor-"):-len(".service")]
+            services.append(short)
+
+    return services
+
+# ----------------------------
+# SQS polling for webhooks
+# ----------------------------
+
+
+
+
+def ensure_executor_service(broker: str, short_name: str) -> None:
+    derived_id = derive_id_from_name(short_name)
+    executor_port = 5001 + derived_id
+
+    unit_name = f"ibkr-executor-{short_name}.service"
+    unit_path = f"/etc/systemd/system/{unit_name}"
+
+    # Create service if missing
+    if not os.path.exists(unit_path):
+        content = f"""[Unit]
+Description=IBKR Executor for {short_name}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/ibc/execution
+Environment=EXECUTOR_LOG_PATH=/opt/ibc/execution/executor-{broker}-{short_name}.log
+Environment=EXECUTOR_STATE_PATH=/opt/ibc/execution/state-{broker}-{short_name}.json
+Environment=DERIVED_ID={derived_id}
+Environment=ACCOUNT_SHORT_NAME={short_name}
+Environment=EXECUTOR_PORT={executor_port}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash /opt/ibc/execution/run_ex.sh
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+"""
+        with open(unit_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
+        subprocess.run(["systemctl", "enable", unit_name], check=False)
+
+        # First-time start
+        subprocess.run(["systemctl", "start", unit_name], check=False)
+        return
+
+    # If service exists → ALWAYS restart it
+    subprocess.run(["systemctl", "restart", unit_name], check=False)
+
+    
+def stop_and_remove_executor_service(short_name: str) -> None:
+    unit_name = f"ibkr-executor-{short_name}.service"
+    unit_path = f"/etc/systemd/system/{unit_name}"
+
+    subprocess.run(["systemctl", "stop", unit_name], check=False)
+    subprocess.run(["systemctl", "disable", unit_name], check=False)
+
+    if os.path.exists(unit_path):
+        os.unlink(unit_path)
+
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -649,6 +818,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--trusted-ip', default=None)
     p.add_argument('--lock-file', default=os.path.expanduser("~/.ibkr/orchestrator.lock"))
 
+    # 🔹 NEW: SQS + Executor endpoints
+    p.add_argument(
+        '--sqs-queue-url',
+        default=os.environ.get("SQS_QUEUE_URL"),
+        help="SQS queue URL for incoming webhooks (optional)",
+    )
+    p.add_argument(
+        '--executor-webhook-url',
+        default=os.environ.get("EXECUTOR_WEBHOOK_URL", "http://127.0.0.1:5001/webhook"),
+        help="Executor webhook URL to forward TradingView payloads",
+    )
+    p.add_argument(
+        '--executor-flatten-url',
+        default=os.environ.get("EXECUTOR_FLATTEN_URL", "http://127.0.0.1:5001/flatten"),
+        help="Executor URL to request flattening positions for an account",
+    )
+
     args = p.parse_args()
 
     if args.region is None:
@@ -660,10 +846,75 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+app = Flask(__name__)
+
+@app.post("/webhook")
+def webhook():
+    payload = request.get_json(force=True)
+    forward_to_all_executors(payload)
+    return jsonify({"ok": True})
+
+
+@app.post("/webhook/<broker>/<short_name>")
+def webhook_broker_account(broker: str, short_name: str):
+    """
+    Webhook for a specific broker + specific account.
+    Example:
+        /webhook/ibkr/acc001
+        /webhook/binance/acc002
+    Called by Lambda2.
+    """
+    payload = request.get_json(force=True)
+
+    try:
+        # NEW: derive ID from broker + short_name
+        combined = f"{broker}_{short_name}"
+        derived_id = derive_id_from_name(combined)
+
+        port = 5001 + derived_id
+        url = f"http://127.0.0.1:{port}/webhook"
+
+        ok = forward_webhook_to_executor(url, payload)
+
+        if not ok:
+            logger.error(
+                "Executor failed: broker=%s account=%s",
+                broker, short_name
+            )
+            return jsonify({
+                "ok": False,
+                "broker": broker,
+                "account": short_name,
+                "error": "executor_failed_or_ib_down"
+            }), 503
+
+        return jsonify({
+            "ok": True,
+            "broker": broker,
+            "account": short_name
+        }), 200
+
+    except Exception:
+        log_exception("Exception in broker+account webhook",
+                      broker=broker, account=short_name)
+        return jsonify({
+            "ok": False,
+            "broker": broker,
+            "account": short_name,
+            "error": "orchestrator_exception"
+        }), 500
+
+
 def main() -> None:
     args = parse_args()
     setup_logging(args.log_level)
-    logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
+    logger.info(
+        "Orchestrator running region=%s filter=%r interval=%ss sqs_queue_url=%r",
+        args.region,
+        args.filter,
+        args.interval,
+        args.sqs_queue_url,
+    )
     # Lock
     try:
         _lock_fd = acquire_lock(args.lock_file)
@@ -700,7 +951,7 @@ def main() -> None:
         sys.exit(2)
 
     logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
-    #logger.warning("Cold start detected → force start/restart all gateways")
+    # logger.warning("Cold start detected → force start/restart all gateways")
     force_start_or_restart_all_secrets(args)
 
     while True:
@@ -748,16 +999,11 @@ def main() -> None:
                     cycle_ok = False
                     log_exception("Failed handling removed secret", secret=sname)
 
+            
+
         except Exception:
             cycle_ok = False
             log_exception("Reconcile cycle failed")
-
-        # Final “cycle” report:
-        # CloudWatch will capture these logs if you're running under a service/agent.
-        # if cycle_ok:
-        #     logger.info("Reconcile cycle completed successfully (no unhandled errors)")
-        # else:
-        #     logger.error("Reconcile cycle completed with errors (see logs above)")
 
         time.sleep(max(5, args.interval))
 
