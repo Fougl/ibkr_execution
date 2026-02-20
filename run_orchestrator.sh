@@ -10,7 +10,7 @@ else
 fi
 
 echo ">>> Checking for running ORCHESTRATOR"
-OPID=$(ps aux | grep "[p]ython3 /opt/ibc/orchestrator/orchestrator.py" | awk '{print $2}' || true)
+OPID=$(ps aux | grep "[p]ython3 /opt/ibc/execution/orchestrator.py" | awk '{print $2}' || true)
 
 if [ -n "$OPID" ]; then
     echo ">>> Killing old Orchestrator PID: $OPID"
@@ -21,15 +21,15 @@ else
 fi
 
 echo ">>> Starting ORCHESTRATOR (secret loop + gateway mgmt)"
-nohup /home/ubuntu/venv/bin/python3 /opt/ibc/orchestrator/orchestrator.py \
-    > /opt/ibc/orchestrator/orchestrator.log 2>&1 &
+nohup /home/ubuntu/venv/bin/python3 /opt/ibc/execution/orchestrator.py \
+    > /opt/ibc/execution/orchestrator.log 2>&1 &
 
-echo ">>> Starting WAITRESS (webhook listener on port ${ORCH_PORT})"
+echo ">>> Starting WAITRESS (webhook listener on port 5001"
 nohup /home/ubuntu/venv/bin/waitress-serve \
     --host=0.0.0.0 \
     --port=5001 \
     orchestrator:app \
-    > /opt/ibc/orchestrator/waitress.log 2>&1 &
+    > /opt/ibc/execution/waitress.log 2>&1 &
 
 sleep 1
 
