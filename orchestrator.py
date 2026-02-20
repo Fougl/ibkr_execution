@@ -370,6 +370,8 @@ def reconcile_ibkr_secrets(
     for page in paginator.paginate():
         for s in page.get("SecretList", []):
             name = s.get("Name", "")
+            if not name.startswith("broker/"):
+                continue
             if name_filter_substring.lower() not in name.lower():
                 continue
 
@@ -590,9 +592,8 @@ def short_name_from_secret_name(secret_name: str) -> str:
     Expected format: ibkr/short_name
     """
     parts = secret_name.split("/")
-    if len(parts) != 2 or not parts[1]:
-        raise ValueError(f"Invalid secret name format: {secret_name}. Expected ibkr/short_name")
-    return parts[1]
+    # last part is always the short_name
+    return parts[-1]
 
 def broker_from_secret_name(secret_name: str) -> str:
     """
@@ -603,9 +604,8 @@ def broker_from_secret_name(secret_name: str) -> str:
         binance/acc002 -> broker="binance"
     """
     parts = secret_name.split("/")
-    if len(parts) != 2 or not parts[0]:
-        raise ValueError(f"Invalid secret name: {secret_name}")
-    return parts[0]
+    # second to last is always the broker
+    return parts[-2]
 
 
 def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
