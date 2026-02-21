@@ -372,8 +372,8 @@ def reconcile_ibkr_secrets(
             name = s.get("Name", "")
             if not name.startswith("broker/"):
                 continue
-            if name_filter_substring.lower() not in name.lower():
-                continue
+            # if name_filter_substring.lower() not in name.lower():
+            #     continue
 
             resp = sm.get_secret_value(SecretId=name)
             secret = json.loads(resp["SecretString"])
@@ -519,6 +519,7 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
 
     # Extract short_name from secret name
     short_name = short_name_from_secret_name(secret_name)
+    broker = broker_from_secret_name(secret_name)
 
     secret = load_secret(args.region, secret_name)
 
@@ -539,7 +540,7 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
 
         # BEFORE stopping gateway → ask executor to flatten all positions
         flatten_account_positions(args.executor_flatten_url, short_name)
-        stop_and_remove_executor_service(short_name)
+        stop_and_remove_executor_service(broker, short_name)
 
 
         derived_id = derive_id_from_name(short_name)
@@ -620,10 +621,12 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
 
     # Derive short_name from secret name
     short_name = short_name_from_secret_name(secret_name)
+    broker = broker_from_secret_name(secret_name)
+
 
     # BEFORE stopping gateway → ask executor to flatten all positions
     flatten_account_positions(args.executor_flatten_url, short_name)
-    stop_and_remove_executor_service(short_name)
+    stop_and_remove_executor_service(broker, short_name)
 
 
     # Deterministic port derivation (same logic as config)
@@ -644,8 +647,8 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
         env=env,
         check=False,
     )
-    broker = broker_from_secret_name(secret_name)
-    ensure_executor_service(broker, short_name)
+    #broker = broker_from_secret_name(secret_name)
+    #ensure_executor_service(broker, short_name)
 
 
 def force_start_or_restart_all_secrets(args) -> None:
@@ -656,9 +659,11 @@ def force_start_or_restart_all_secrets(args) -> None:
     for page in paginator.paginate():
         for s in page.get("SecretList", []):
             secret_name = s.get("Name", "")
-
-            if args.filter.lower() not in secret_name.lower():
+            if not secret_name.startswith("broker/"):
                 continue
+
+            # if args.filter.lower() not in secret_name.lower():
+            #     continue
 
             try:
                 logger.info("Ensuring gateway for secret=%s", secret_name)
@@ -680,6 +685,7 @@ def force_start_or_restart_all_secrets(args) -> None:
 
                 # Extract short_name from secret name
                 short_name = short_name_from_secret_name(secret_name)
+                broker = broker_from_secret_name(secret_name)
 
                 # Build paths
                 paths = build_account_paths(args.accounts_base, short_name)
@@ -712,6 +718,7 @@ def force_start_or_restart_all_secrets(args) -> None:
                     secret_name,
                     p.pid,
                 )
+                ensure_executor_service(broker, short_name)
 
             except Exception:
                 log_exception("Failed force start/restart", secret=secret_name)
@@ -721,8 +728,8 @@ def get_active_executor_shortnames() -> list[str]:
     path = "/etc/systemd/system"
 
     for f in os.listdir(path):
-        if f.startswith("ibkr-executor-") and f.endswith(".service"):
-            short = f[len("ibkr-executor-"):-len(".service")]
+        if f.startswith("executor-") and f.endswith(".service"):
+            short = f[len("executor-"):-len(".service")]
             services.append(short)
 
     return services
@@ -738,7 +745,7 @@ def ensure_executor_service(broker: str, short_name: str) -> None:
     derived_id = derive_id_from_name(short_name)
     executor_port = 5001 + derived_id
 
-    unit_name = f"ibkr-executor-{short_name}.service"
+    unit_name = f"executor-{broker}-{short_name}.service"
     unit_path = f"/etc/systemd/system/{unit_name}"
 
     # Create service if missing
@@ -780,8 +787,8 @@ WantedBy=multi-user.target
     subprocess.run(["systemctl", "restart", unit_name], check=False)
 
     
-def stop_and_remove_executor_service(short_name: str) -> None:
-    unit_name = f"ibkr-executor-{short_name}.service"
+def stop_and_remove_executor_service(broker: str, short_name: str) -> None:
+    unit_name = f"executor-{broker}-{short_name}.service"
     unit_path = f"/etc/systemd/system/{unit_name}"
 
     subprocess.run(["systemctl", "stop", unit_name], check=False)
