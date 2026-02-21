@@ -1048,7 +1048,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
         # Ensure persistent global IB connection is alive
     if not IB_INSTANCE or not IB_INSTANCE.isConnected():
         logger.info("[ALARM] Global IB_INSTANCE is not connected")
-        return jsonify({"ok": False, "error": "ib_not_connected"}), 503
+        #return jsonify({"ok": False, "error": "ib_not_connected"}), 503
 
 
     log_step( "Postopen potential position reopen")
