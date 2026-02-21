@@ -301,7 +301,7 @@ def load_settings_from_ssm() -> "Settings":
         #log_step(0, f"[SSM] Loaded JSON settings: {data}")
 
     except Exception as e:
-        log_step(0, f"[SSM ERROR] Failed loading /ankro/settings: {e}")
+        log_step(f"[SSM ERROR] Failed loading /ankro/settings: {e}")
         data = {}
 
     def get(key, default):
@@ -622,7 +622,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
 
 
 def cancel_all_open_orders(reason="", symbol=None, contract=None):
-    log_step(ACCOUNT_SHORT_NAME, f"CANCEL_OPEN_ORDERS reason={reason}")
+    log_step( f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
         trades = IB_INSTANCE.openTrades()
@@ -630,7 +630,7 @@ def cancel_all_open_orders(reason="", symbol=None, contract=None):
         trades = []
 
     if not trades:
-        log_step(ACCOUNT_SHORT_NAME, "CANCEL_OPEN_ORDERS: NONE")
+        log_step( "CANCEL_OPEN_ORDERS: NONE")
         return
 
     for t in trades:
@@ -650,7 +650,7 @@ def cancel_all_open_orders(reason="", symbol=None, contract=None):
         except:
             continue
 
-    log_step(ACCOUNT_SHORT_NAME, "CANCEL_OPEN_ORDERS: DONE")
+    log_step( "CANCEL_OPEN_ORDERS: DONE")
 
 
 
@@ -672,8 +672,8 @@ def current_position_qty(contract: Contract) -> int:
 
 def close_position(contract: Contract, qty: int) -> None:
     action = "SELL" if qty > 0 else "BUY"
-    log_step(ACCOUNT_SHORT_NAME, f"CLOSE_POSITION: sending {action} {abs(qty)}")
-    log_step(ACCOUNT_SHORT_NAME,
+    log_step( f"CLOSE_POSITION: sending {action} {abs(qty)}")
+    log_step(
     f"[CLOSE_DEBUG] Contract before placeOrder: "
     f"secType={getattr(contract,'secType',None)} "
     f"symbol={getattr(contract,'symbol',None)} "
@@ -686,7 +686,7 @@ def close_position(contract: Contract, qty: int) -> None:
         order = MarketOrder(action, abs(int(qty)))
         IB_INSTANCE.placeOrder(contract, order)
     except Exception as e:
-        log_step(ACCOUNT_SHORT_NAME, f"CLOSE_POSITION_FAIL: error={e}")
+        log_step( f"CLOSE_POSITION_FAIL: error={e}")
         return
 
     # More robust wait loop: IB updates positions asynchronously
@@ -700,10 +700,10 @@ def close_position(contract: Contract, qty: int) -> None:
 
         remaining = current_position_qty(contract)
         if remaining == 0:
-            log_step(ACCOUNT_SHORT_NAME, f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
+            log_step( f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
             return
 
-    log_step(ACCOUNT_SHORT_NAME, f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
+    log_step( f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
 
 
 
@@ -751,13 +751,13 @@ def get_min_tick(contract: Contract) -> float:
             raise RuntimeError("reqContractDetails returned empty")
         mt = float(details[0].minTick)
     except Exception as e:
-        log_step(ACCOUNT_SHORT_NAME, f"[ALARM] MIN_TICK_FAIL: using fallback 0.01 err={e}")
+        log_step( f"[ALARM] MIN_TICK_FAIL: using fallback 0.01 err={e}")
         mt = 0.01  # fallback so we don't crash; futures will still likely reject if wrong
 
     with _MIN_TICK_LOCK:
         _MIN_TICK_CACHE[key] = mt
 
-    log_step(ACCOUNT_SHORT_NAME, f"MIN_TICK: {mt}")
+    log_step( f"MIN_TICK: {mt}")
     return mt
 
     
@@ -772,7 +772,7 @@ def open_position_with_brackets(
 ) -> None:
 
     if take_profit is None or stop_loss is None:
-        log_step(ACCOUNT_SHORT_NAME, "OPEN_ENTRY_SKIPPED: TP or SL missing")
+        log_step( "OPEN_ENTRY_SKIPPED: TP or SL missing")
         return
 
     action = "BUY" if direction > 0 else "SELL"
@@ -784,7 +784,7 @@ def open_position_with_brackets(
     parent = MarketOrder(action, abs(int(qty)))
     trade = IB_INSTANCE.placeOrder(contract, parent)
 
-    log_step(ACCOUNT_SHORT_NAME, "PARENT_ORDER_SUBMITTED")
+    log_step( "PARENT_ORDER_SUBMITTED")
 
     # ------------------------------------------------
     # 2️⃣ WAIT FOR FILL
@@ -799,10 +799,10 @@ def open_position_with_brackets(
             break
 
     if not fill_price:
-        log_step(ACCOUNT_SHORT_NAME, "FILL_FAIL: parent not filled")
+        log_step( "FILL_FAIL: parent not filled")
         return
 
-    log_step(ACCOUNT_SHORT_NAME, f"FILL_PRICE: {fill_price}")
+    log_step( f"FILL_PRICE: {fill_price}")
 
     # ------------------------------------------------
     # 3️⃣ CALCULATE TP / SL FROM REAL FILL
@@ -822,8 +822,8 @@ def open_position_with_brackets(
     sl_price = _round_to_tick(sl_price, tick)
 
 
-    log_step(ACCOUNT_SHORT_NAME, f"TP_PRICE: {tp_price}")
-    log_step(ACCOUNT_SHORT_NAME, f"SL_PRICE: {sl_price}")
+    log_step( f"TP_PRICE: {tp_price}")
+    log_step( f"SL_PRICE: {sl_price}")
 
     # ------------------------------------------------
     # 4️⃣ SEND OCO CHILD ORDERS
@@ -845,9 +845,9 @@ def open_position_with_brackets(
     IB_INSTANCE.sleep(0.5)
     IB_INSTANCE.waitOnUpdate(timeout=2)
 
-    log_step(ACCOUNT_SHORT_NAME, "BRACKET_CHILDREN_SUBMITTED")
-    log_step(ACCOUNT_SHORT_NAME, f"PositionsAfter: {len(IB_INSTANCE.positions())}")
-    log_step(ACCOUNT_SHORT_NAME, f"TradesAfter:    {len(IB_INSTANCE.openTrades())}")
+    log_step( "BRACKET_CHILDREN_SUBMITTED")
+    log_step( f"PositionsAfter: {len(IB_INSTANCE.positions())}")
+    log_step( f"TradesAfter:    {len(IB_INSTANCE.openTrades())}")
 
 
 
@@ -882,10 +882,10 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
 
     
     if not IB_INSTANCE.isConnected():
-        log_step(ACCOUNT_SHORT_NAME, "[ALARM] Preclose: IB not connected")
+        log_step( "[ALARM] Preclose: IB not connected")
         return
 
-    log_step(ACCOUNT_SHORT_NAME, "Preclose potential position closing")
+    log_step( "Preclose potential position closing")
     try:
         with _state_lock:
             st = load_state()
@@ -914,7 +914,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
         orders_snapshot: List[Dict[str, Any]] = []
 
         if not trades:
-            log_step(ACCOUNT_SHORT_NAME, "No open orders to cancel")
+            log_step( "No open orders to cancel")
         else:
             for t in trades:
                 o = t.order
@@ -960,7 +960,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
         snapshot: Dict[str, Any] = {}
 
         if not pos:
-            log_step(ACCOUNT_SHORT_NAME, "No open position to close")
+            log_step( "No open position to close")
         else:
             for p in pos:
                 if int(p.position) != 0:
@@ -1003,7 +1003,6 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
                         pass
 
                 log_step(
-                    ACCOUNT_SHORT_NAME,
                     f"Preclose: acct={ACCOUNT_SHORT_NAME} closing {c.secType} {c.symbol} conId={cid} exch={getattr(c,'exchange',None)} qty={q}"
                 )
 
@@ -1028,10 +1027,10 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
             }
             save_state(st)
 
-        log_step(ACCOUNT_SHORT_NAME, f"Preclose: acct={ACCOUNT_SHORT_NAME} completed snapshot_count={len(snapshot)}")
+        log_step( f"Preclose: acct={ACCOUNT_SHORT_NAME} completed snapshot_count={len(snapshot)}")
 
     except Exception as e:
-        log_step(ACCOUNT_SHORT_NAME, f"Preclose error acct={ACCOUNT_SHORT_NAME}: {e}")
+        log_step( f"Preclose error acct={ACCOUNT_SHORT_NAME}: {e}")
 
     finally:
         flush_account_log("PRECLOSE_EXEC")
@@ -1052,7 +1051,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
         return jsonify({"ok": False, "error": "ib_not_connected"}), 503
 
 
-    log_step(ACCOUNT_SHORT_NAME, "Postopen potential position reopen")
+    log_step( "Postopen potential position reopen")
     try:
         with _state_lock:
             st = load_state()
@@ -1060,10 +1059,10 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
 
         # must have preclose + not already reopened
         if not entry:
-            log_step(ACCOUNT_SHORT_NAME, "Nothing to reopen")
+            log_step( "Nothing to reopen")
             return
         if entry.get("reopen_done") or entry.get("done"):
-            log_step(ACCOUNT_SHORT_NAME, "Postopen was already triggered")
+            log_step( "Postopen was already triggered")
             return
 
         snapshot: Dict[str, Any] = entry.get("snapshot", {}) or {}
@@ -1074,7 +1073,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
         # must be flat right now
         any_open = any(int(p.position) != 0 for p in IB_INSTANCE.positions())
         if any_open:
-            log_step(ACCOUNT_SHORT_NAME, f"Postopen: acct={ACCOUNT_SHORT_NAME} not flat; will not reopen.")
+            log_step( f"Postopen: acct={ACCOUNT_SHORT_NAME} not flat; will not reopen.")
             #IB_INSTANCE.disconnect()
             return
 
@@ -1085,7 +1084,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
                 st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_done"] = True
                 st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_at"] = now_local.isoformat()
                 save_state(st)
-            log_step(ACCOUNT_SHORT_NAME, f"Postopen: acct={ACCOUNT_SHORT_NAME} nothing to reopen (empty snapshot).")
+            log_step( f"Postopen: acct={ACCOUNT_SHORT_NAME} nothing to reopen (empty snapshot).")
             #IB_INSTANCE.disconnect()
             return
 
@@ -1098,7 +1097,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
             try:
                 conId = int(conId_key)
             except:
-                log_step(ACCOUNT_SHORT_NAME, f"[POSTOPEN] Invalid conId key={conId_key}, skipping.")
+                log_step( f"[POSTOPEN] Invalid conId key={conId_key}, skipping.")
                 continue
 
             # Build by conId (BEST POSSIBLE METHOD)
@@ -1110,7 +1109,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
                 if qc:
                     c = qc[0]   # fully qualified contract
             except Exception as e:
-                log_step(ACCOUNT_SHORT_NAME, f"[POSTOPEN] qualify failed conId={conId}: {e}")
+                log_step( f"[POSTOPEN] qualify failed conId={conId}: {e}")
 
             direction = +1 if int(meta.get("position", 0)) > 0 else -1
             qty = abs(int(meta.get("position", 0)))
@@ -1135,7 +1134,6 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
                     sl_price = float(aux)
 
             log_step(
-                ACCOUNT_SHORT_NAME,
                 f"[POSTOPEN] Reopening with bracket acct={ACCOUNT_SHORT_NAME} "
                 f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
                 f"tp={tp_price} sl={sl_price}"
@@ -1164,7 +1162,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
 
     except Exception as e:
         #IB_INSTANCE.disconnect()
-        log_step(ACCOUNT_SHORT_NAME, f"Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
+        log_step( f"Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
     finally:
         # try:
         #     IB_INSTANCE.disconnect()
@@ -1216,7 +1214,7 @@ def parse_timestamp(value) -> float | None:
 def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any]:
     
     if not IB_INSTANCE.isConnected():
-        log_step(ACCOUNT_SHORT_NAME, "IB_NOT_CONNECTED")
+        log_step( "IB_NOT_CONNECTED")
         flush_account_log("WEBHOOK_EXEC")
     
         return {
@@ -1226,10 +1224,9 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
             "ok": False,
             "error": "ib_not_connected",
         }
-    log_step(ACCOUNT_SHORT_NAME, f"DEBUG acct={ACCOUNT_SHORT_NAME} port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
+    log_step( f"DEBUG acct={ACCOUNT_SHORT_NAME} port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
 
     log_step(
-        ACCOUNT_SHORT_NAME,
         f"EXEC_START alert={sig.raw_alert} "
         f"symbol={sig.symbol} "
         f"dir={'SELL' if sig.desired_direction == -1 else 'BUY'} "
@@ -1262,7 +1259,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         
         # If 0 or more than 1 contract returned → ambiguous
         if not qualified or len(qualified) != 1:
-            log_step(ACCOUNT_SHORT_NAME, 
+            log_step( 
                 f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                 f"qualified_count={len(qualified)}"
             )
@@ -1288,12 +1285,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
 
         qty = current_position_qty(contract)
         logger.info(f"two")
-        log_step(ACCOUNT_SHORT_NAME, "#############STATE CHECK######################")
+        log_step( "#############STATE CHECK######################")
         if qty != 0:
             side = "BUY" if qty > 0 else "SELL"
-            log_step(ACCOUNT_SHORT_NAME, f"Current position for symbol: {side} {abs(qty)}")
+            log_step( f"Current position for symbol: {side} {abs(qty)}")
         else:
-            log_step(ACCOUNT_SHORT_NAME, "Current position for symbol: No opened positions")
+            log_step( "Current position for symbol: No opened positions")
         
         try:
             trades = IB_INSTANCE.openTrades()
@@ -1310,7 +1307,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 continue
         
         if filtered:
-            log_step(ACCOUNT_SHORT_NAME, "Open orders for symbol:")
+            log_step( "Open orders for symbol:")
             for t in filtered:
                 try:
                     c = t.contract
@@ -1318,7 +1315,6 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                     #os = t.orderState
         
                     log_step(
-                        ACCOUNT_SHORT_NAME,
                         "  " + " ".join([
                             f"type={getattr(o,'orderType',None)}",
                             f"action={getattr(o,'action',None)}",
@@ -1326,12 +1322,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                         ])
                     )
                 except Exception as e:
-                    log_step(ACCOUNT_SHORT_NAME, f"ERROR printing open order: {e}")
+                    log_step( f"ERROR printing open order: {e}")
                     raise
         else:
-            log_step(ACCOUNT_SHORT_NAME, "Open orders for symbol: NONE")
+            log_step( "Open orders for symbol: NONE")
         
-        log_step(ACCOUNT_SHORT_NAME, "#############END OF STATE CHECK#################")
+        log_step( "#############END OF STATE CHECK#################")
 
 
 
@@ -1346,12 +1342,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 sig_age = now_ts - sig.signal_timestamp
             except:
                 sig_age = None
-        #log_step(ACCOUNT_SHORT_NAME, f"[EXEC] Signal timestamp {sig.signal_timestamp}  {int(settings.execution_delay)}")
+        #log_step( f"[EXEC] Signal timestamp {sig.signal_timestamp}  {int(settings.execution_delay)}")
         allow_entry = False
         allow_entry = True
         if sig.desired_direction != 0 and sig_age is not None:
             if sig_age > int(settings.execution_delay):
-                log_step(ACCOUNT_SHORT_NAME, f"[EXEC] Entry not executed: the execution is delayed by more than {int(settings.execution_delay)} relative to the signal")
+                log_step( f"[EXEC] Entry not executed: the execution is delayed by more than {int(settings.execution_delay)} relative to the signal")
                 allow_entry = False
         #logger.info(f"[EXEC] latency_check sig_age={sig_age} execution_delay={int(settings.execution_delay)} allow_entry={allow_entry}")
 
@@ -1365,7 +1361,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 contract=contract
             )
             if qty == 0:
-                log_step(ACCOUNT_SHORT_NAME, "No positions to exit for the exit signal")
+                log_step( "No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
                 #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
                 #IB_INSTANCE.disconnect()
@@ -1378,7 +1374,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
 
             # Retry logic
             if not wait_until_flat( contract, settings):
-                log_step(ACCOUNT_SHORT_NAME, "Exit close not reflected — retrying")
+                log_step( "Exit close not reflected — retrying")
                 #close_position(contract, qty)
                 time.sleep(1)
 
@@ -1387,7 +1383,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 #IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
-            log_step(ACCOUNT_SHORT_NAME, "Position closed successfully")
+            log_step( "Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
             #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
             #IB_INSTANCE.disconnect()
@@ -1401,7 +1397,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         desired_qty = sig.desired_qty if sig.desired_qty > 0 else DEFAULT_QTY
 
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
-            log_step(ACCOUNT_SHORT_NAME, "[EXEC] Same direction position already opened. Skipping execution")
+            log_step( "[EXEC] Same direction position already opened. Skipping execution")
             result.update({"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
             #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
             #IB_INSTANCE.disconnect()
@@ -1412,14 +1408,14 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # REVERSAL (close ALWAYS, but entry obeys latency)
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
-            log_step(ACCOUNT_SHORT_NAME, f"[EXEC] Opposite direction singal: Closing position and opening new one.")
+            log_step( f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(contract, qty)
             cancel_all_open_orders(reason="before_reversal_entry",  contract=contract)
             time.sleep(1)
 
             # Retry close
             if not wait_until_flat(contract, settings):
-                log_step(ACCOUNT_SHORT_NAME, "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
+                log_step( "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
                 #close_position(contract, qty)
                 time.sleep(1)
                 result.update({"ok": False, "action": "reversal_close_not_confirmed"})
@@ -1447,7 +1443,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 return result
             
             if not sig.risk_valid:
-                log_step(ACCOUNT_SHORT_NAME, "[EXEC] TP or SL not specified. Skipping execution")
+                log_step( "[EXEC] TP or SL not specified. Skipping execution")
                 result.update({
                     "ok": True,
                     "action": "reversal_closed_but_entry_skipped_no_risk_params",
@@ -1503,7 +1499,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 return result
             
             if desired_dir != 0 and not sig.risk_valid:
-                log_step(ACCOUNT_SHORT_NAME, "[EXEC] TP or SL not specified. Skipping execution")
+                log_step( "[EXEC] TP or SL not specified. Skipping execution")
                 result.update({
                     "ok": True,
                     "action": "entry_ignored_no_risk_params",
