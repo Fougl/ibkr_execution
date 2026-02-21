@@ -718,6 +718,7 @@ def force_start_or_restart_all_secrets(args) -> None:
                     secret_name,
                     p.pid,
                 )
+                time.sleep(20)
                 ensure_executor_service(broker, short_name)
 
             except Exception:
