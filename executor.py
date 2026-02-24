@@ -141,57 +141,32 @@ logger.propagate = False
 IB_INSTANCE = None
 IB_LOCK = threading.Lock()
 
-class IBNotReadyError(Exception):
-    """Raised when IB gateway is not yet ready / login not completed."""
-    pass
 
-def ensure_ib_loop_running(ib: IB) -> None:
-    """
-    Start the ib_insync event loop in a background thread exactly once.
-    Needed so qualifyContracts() and others never hang.
-    """
-    # _thread may not exist yet on a fresh IB instance → use getattr
-    existing = getattr(ib, "_thread", None)
-    if existing is not None and existing.is_alive():
-        return  # already running
-
-    def _run():
-        ib.run()
-
-    t = threading.Thread(target=_run, daemon=True)
-    # (optionally store it so future getattr() sees it)
-    ib._thread = t
-    t.start()
-    logger.info("[IB] Background event loop started")
-    
-def start_ib_connection():
-    global IB_INSTANCE
+def connect_ib_for_webhook():
+    ib = IB()
 
     port = 4002 + DERIVED_ID
     cid  = 1 + DERIVED_ID
 
-    while True:
-        try:
-            logger.info(f"[IB] Connecting to {IB_HOST}:{port} cid={cid} ...")
-            ib = IB()
-            ib.connect(
-                host=IB_HOST,
-                port=port,
-                clientId=cid,
-                timeout=IB_CONNECT_TIMEOUT_SEC,
-            )
-        except Exception as e:
-            logger.warning(f"[IB] Connection failed: {e}; retrying in 1 sec")
-            time.sleep(1)
-            continue
+    try:
+        ib.connect(
+            host='127.0.0.1',
+            port=port,
+            clientId=cid,
+            timeout=5
+        )
+        return ib
+    except Exception as e:
+        logger.error(f"[IB] Webhook-connect failed: {e}")
+        return None
 
-        # If we got here, connect() returned without throwing → we are in
-        ensure_ib_loop_running(ib)
 
-        with IB_LOCK:
-            IB_INSTANCE = ib
-        logger.info(f"[IB] CONNECTED + LOOP RUNNING on {IB_HOST}:{port} cid={cid}")
-        return
+def disconnect_ib(ib: IB):
+    try:
+        if ib and ib.isConnected():
+            ib.disconnect()
+    except:
+        pass
 
 
 _account_logs = {}       # { short_name: [str, str, ...] }
@@ -1664,7 +1639,7 @@ def start_scheduler():
 # START scheduler on module import (works with Waitress)
 
 #start_scheduler()
-start_ib_connection()  
+#start_ib_connection()  
 # ---------------------------
 # Flask app
 # ---------------------------
@@ -1675,6 +1650,11 @@ app = Flask(__name__)
 @app.post("/webhook")
 def webhook() -> Any:
     logger.info("===HTTP /webhook received")
+    ib = connect_ib_for_webhook()
+    IB_INSTANCE=ib
+    if ib is None or not ib.isConnected():
+        logger.error("Cannot process webhook: IB is down")
+        return jsonify({"ok": False, "error": "ib_down"}), 503
     try:
         payload = request.get_json(force=True, silent=False) or {}
     except Exception:
@@ -1714,6 +1694,16 @@ def webhook() -> Any:
     except Exception as e:
         logger.exception(f"Webhook handling failed. payload={payload} err={e}")
         return jsonify({"ok": False, "error": str(e)}), 400
+    finally:
+       # 🔥 CRITICAL — disconnect exactly once
+       try:
+           if IB_INSTANCE and IB_INSTANCE.isConnected():
+               IB_INSTANCE.disconnect()
+               logger.info("[IB] Clean disconnect after webhook")
+       except Exception:
+           pass
+
+       IB_INSTANCE = None  # cleanup
 
 
 # --------------------------------------------------------------------
