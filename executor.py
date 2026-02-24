@@ -189,7 +189,7 @@ def get_ib(raise_on_failure: bool = False):
 
                 except Exception as e:
                     logger.warning(f"IB connect failed (attempt {attempt+1}): {e}")
-                    time.sleep(1)
+                    time.sleep(2)
 
             # Grace period expired → fall through
 
