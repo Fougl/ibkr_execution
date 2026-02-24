@@ -857,6 +857,7 @@ Environment=IBC_INI={paths["config_ini"]}
 Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
+ExecStart={GATEWAY_START} -inline
 ExecStart={GATEWAY_START}
 ExecStop={GATEWAY_STOP}
 Restart=always
