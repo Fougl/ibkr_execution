@@ -145,16 +145,22 @@ class IBNotReadyError(Exception):
     """Raised when IB gateway is not yet ready / login not completed."""
     pass
 
-def ensure_ib_loop_running(ib: IB):
+def ensure_ib_loop_running(ib: IB) -> None:
     """
     Start the ib_insync event loop in a background thread exactly once.
     Needed so qualifyContracts() and others never hang.
     """
-    if ib._thread and ib._thread.is_alive():
+    # _thread may not exist yet on a fresh IB instance → use getattr
+    existing = getattr(ib, "_thread", None)
+    if existing is not None and existing.is_alive():
         return  # already running
 
-    import threading
-    t = threading.Thread(target=ib.run, daemon=True)
+    def _run():
+        ib.run()
+
+    t = threading.Thread(target=_run, daemon=True)
+    # (optionally store it so future getattr() sees it)
+    ib._thread = t
     t.start()
     logger.info("[IB] Background event loop started")
     
@@ -174,16 +180,18 @@ def start_ib_connection():
                 clientId=cid,
                 timeout=IB_CONNECT_TIMEOUT_SEC,
             )
-
-            # ⭐ REQUIRED ⭐
-            ensure_ib_loop_running(ib)
-
-            IB_INSTANCE = ib
-            logger.info(f"[IB] CONNECTED + LOOP RUNNING on {IB_HOST}:{port} cid={cid}")
-            return
         except Exception as e:
             logger.warning(f"[IB] Connection failed: {e}; retrying in 1 sec")
             time.sleep(1)
+            continue
+
+        # If we got here, connect() returned without throwing → we are in
+        ensure_ib_loop_running(ib)
+
+        with IB_LOCK:
+            IB_INSTANCE = ib
+        logger.info(f"[IB] CONNECTED + LOOP RUNNING on {IB_HOST}:{port} cid={cid}")
+        return
 
 
 _account_logs = {}       # { short_name: [str, str, ...] }
