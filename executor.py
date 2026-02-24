@@ -811,7 +811,7 @@ def open_position_with_brackets(IB_INSTANCE,
     if not fill_price:
         log_step( "FILL_FAIL: parent not filled")
         return
-
+    log_step(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     log_step( f"FILL_PRICE: {fill_price}")
 
     # ------------------------------------------------
@@ -1724,7 +1724,7 @@ def webhook() -> Any:
                logger.info("[IB] Clean disconnect after webhook")
        except Exception:
            pass
-       logger.info("[IB] Clean disconnect after webhook")
+       #logger.info("[IB] Clean disconnect after webhook")
        IB_INSTANCE = None  # cleanup
 
 
