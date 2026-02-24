@@ -61,7 +61,8 @@ from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, 
 import asyncio
 from decimal import Decimal, ROUND_HALF_UP
 
-
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+asyncio.set_event_loop(None)
 # ---------------------------
 # Config (ENV)
 # ---------------------------
