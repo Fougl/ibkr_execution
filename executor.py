@@ -630,7 +630,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
 
 
 
-def cancel_all_open_orders(reason="", symbol=None, contract=None):
+def cancel_all_open_orders(IB_INSTANCE,reason="", symbol=None, contract=None):
     log_step( f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
@@ -664,7 +664,7 @@ def cancel_all_open_orders(reason="", symbol=None, contract=None):
 
 
 
-def current_position_qty(contract: Contract) -> int:
+def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
     qty = 0
     for p in IB_INSTANCE.positions():
         try:
@@ -679,7 +679,7 @@ def current_position_qty(contract: Contract) -> int:
     return qty
 
 
-def close_position(contract: Contract, qty: int) -> None:
+def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
     action = "SELL" if qty > 0 else "BUY"
     log_step( f"CLOSE_POSITION: sending {action} {abs(qty)}")
     log_step(
@@ -707,7 +707,7 @@ def close_position(contract: Contract, qty: int) -> None:
         IB_INSTANCE.reqPositions()
         IB_INSTANCE.waitOnUpdate(timeout=0.5)
 
-        remaining = current_position_qty(contract)
+        remaining = current_position_qty(IB_INSTANCE,contract)
         if remaining == 0:
             log_step( f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
             return
@@ -771,7 +771,7 @@ def get_min_tick(contract: Contract) -> float:
     return mt
 
     
-def open_position_with_brackets(
+def open_position_with_brackets(IB_INSTANCE,
     contract: Contract,
     direction: int,
     qty: int,
@@ -827,7 +827,7 @@ def open_position_with_brackets(
         tp_price = fill_price * (1 - tp_pct)
         sl_price = fill_price * (1 + sl_pct)
 
-    tick = get_min_tick(contract, ACCOUNT_SHORT_NAME)
+    tick = get_min_tick(IB_INSTANCE,contract, ACCOUNT_SHORT_NAME)
     tp_price = _round_to_tick(tp_price, tick)
     sl_price = _round_to_tick(sl_price, tick)
 
@@ -866,9 +866,9 @@ def open_position_with_brackets(
 
 
 
-def wait_until_flat(contract: Contract, settings: Settings) -> bool:
+def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool:
     for i in range(MAX_STATE_CHECKS):
-        qty = current_position_qty(contract)
+        qty = current_position_qty(IB_INSTANCE, contract)
         if qty == 0:
             return True
         #logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
@@ -948,7 +948,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
                     "currency": getattr(c, "currency", None),
                 })
 
-            cancel_all_open_orders(reason="preclose")
+            cancel_all_open_orders(IB_INSTANCE, reason="preclose")
 
         # =======================================================
         # BUILD MAP FOR CORRECT CONTRACT PAIRING BY conId
@@ -1016,7 +1016,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
                     f"Preclose: acct={ACCOUNT_SHORT_NAME} closing {c.secType} {c.symbol} conId={cid} exch={getattr(c,'exchange',None)} qty={q}"
                 )
 
-                close_position(c, q)
+                close_position(IB_INSTANCE,c, q)
 
         #IB_INSTANCE.disconnect()
 
@@ -1149,7 +1149,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
                 f"tp={tp_price} sl={sl_price}"
             )
 
-            open_position_with_brackets(
+            open_position_with_brackets(IB_INSTANCE,
                 c,
                 direction,
                 qty,
@@ -1221,7 +1221,7 @@ def parse_timestamp(value) -> float | None:
 # ---------------------------
 # Per-account signal execution
 # ---------------------------
-def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any]:
+def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> Dict[str, Any]:
     
     if not IB_INSTANCE.isConnected():
         log_step( "IB_NOT_CONNECTED")
@@ -1293,7 +1293,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         contract = qualified[0]
 
 
-        qty = current_position_qty(contract)
+        qty = current_position_qty(IB_INSTANCE,contract)
         logger.info(f"two")
         log_step( "#############STATE CHECK######################")
         if qty != 0:
@@ -1366,7 +1366,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
             #logger.info(f"[EXEC] Branch=EXIT acct={ACCOUNT_SHORT_NAME} current_qty={qty}")
-            cancel_all_open_orders(
+            cancel_all_open_orders(IB_INSTANCE,
                 reason="exit_signal",
                 contract=contract
             )
@@ -1379,11 +1379,11 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 return result
 
             # Close existing position
-            close_position(contract, qty)
+            close_position(IB_INSTANCE, contract, qty)
             time.sleep(1)
 
             # Retry logic
-            if not wait_until_flat( contract, settings):
+            if not wait_until_flat(IB_INSTANCE, contract, settings):
                 log_step( "Exit close not reflected — retrying")
                 #close_position(contract, qty)
                 time.sleep(1)
@@ -1419,12 +1419,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step( f"[EXEC] Opposite direction singal: Closing position and opening new one.")
-            close_position(contract, qty)
-            cancel_all_open_orders(reason="before_reversal_entry",  contract=contract)
+            close_position(IB_INSTANCE,contract, qty)
+            cancel_all_open_orders(IB_INSTANCE,reason="before_reversal_entry",  contract=contract)
             time.sleep(1)
 
             # Retry close
-            if not wait_until_flat(contract, settings):
+            if not wait_until_flat(IB_INSTANCE,contract, settings):
                 log_step( "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
                 #close_position(contract, qty)
                 time.sleep(1)
@@ -1468,7 +1468,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
-            open_position_with_brackets(
+            open_position_with_brackets(IB_INSTANCE,
                 contract,
                 desired_dir,
                 desired_qty,
@@ -1496,7 +1496,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # ----------------------------------------------------------
         if qty == 0:
             # Skip stale entries
-            cancel_all_open_orders(reason="before_new_entry", contract=contract)
+            cancel_all_open_orders(IB_INSTANCE,reason="before_new_entry", contract=contract)
             if not allow_entry:
                 result.update({
                     "ok": True,
@@ -1524,7 +1524,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
             
-            open_position_with_brackets(
+            open_position_with_brackets(IB_INSTANCE,
                 contract,
                 desired_dir,
                 desired_qty,
@@ -1663,7 +1663,7 @@ app = Flask(__name__)
 
 @app.post("/webhook")
 def webhook() -> Any:
-    global IB_INSTANCE
+    #global IB_INSTANCE
     logger.info("===HTTP /webhook received")
     ib = connect_ib_for_webhook()
     IB_INSTANCE=ib
@@ -1702,7 +1702,7 @@ def webhook() -> Any:
 
         
 
-        result = execute_signal_for_account(sig, settings)
+        result = execute_signal_for_account(IB_INSTANCE, sig, settings)
         return jsonify({"ok": result["ok"], "result": result}), 200
 
 
