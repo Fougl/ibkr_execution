@@ -814,11 +814,16 @@ def open_position_with_brackets(IB_INSTANCE,
         if trade.fills:
             fill_price = trade.fills[-1].execution.price
             break
-
+    log_step(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     if not fill_price:
         log_step( "FILL_FAIL: parent not filled")
-        return
-    log_step(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        return {
+            "ok": True,                         # <-- critical
+            "action": "fill_timeout_no_entry",
+            "reason": "market_not_filling",
+            "executed": False
+        }
+    
     log_step( f"FILL_PRICE: {fill_price}")
 
     # ------------------------------------------------
@@ -1475,7 +1480,17 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
-            open_position_with_brackets(IB_INSTANCE,
+            # open_position_with_brackets(IB_INSTANCE,
+            #     contract,
+            #     desired_dir,
+            #     desired_qty,
+            #     sig.take_profit,
+            #     sig.stop_loss,
+            #     sig.target_percentage,
+            #     ACCOUNT_SHORT_NAME    # <<< NEW
+            # )
+            
+            op=open_position_with_brackets(IB_INSTANCE,
                 contract,
                 desired_dir,
                 desired_qty,
@@ -1484,6 +1499,16 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 sig.target_percentage,
                 ACCOUNT_SHORT_NAME    # <<< NEW
             )
+
+            if not op.get("executed", False):
+                # child says: fill_timeout or some other skip reason
+                result.update({
+                    "ok": True,            # important → SQS stops retrying
+                    "action": "entry_skipped",
+                    "executed": False,
+                    "reason": op.get("reason")
+                })
+                return result
 
             #logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
@@ -1531,7 +1556,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
             
-            open_position_with_brackets(IB_INSTANCE,
+            op=open_position_with_brackets(IB_INSTANCE,
                 contract,
                 desired_dir,
                 desired_qty,
@@ -1540,6 +1565,16 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 sig.target_percentage,
                 ACCOUNT_SHORT_NAME    # <<< NEW
             )
+
+            if not op.get("executed", False):
+                # child says: fill_timeout or some other skip reason
+                result.update({
+                    "ok": True,            # important → SQS stops retrying
+                    "action": "entry_skipped",
+                    "executed": False,
+                    "reason": op.get("reason")
+                })
+                return result
 
             #logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
