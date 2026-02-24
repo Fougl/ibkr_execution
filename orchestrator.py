@@ -858,6 +858,7 @@ Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
 ExecStart=/bin/bash -c '{GATEWAY_RESTART}; {GATEWAY_START}'
+ExecStart={GATEWAY_START}
 ExecStop={GATEWAY_STOP}
 Restart=always
 RestartSec=10
