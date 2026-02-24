@@ -1669,7 +1669,7 @@ def webhook() -> Any:
     ib = connect_ib_for_webhook()
     IB_INSTANCE=ib
     if ib is None or not ib.isConnected():
-        logger.error("Cannot process webhook: IB is down")
+        logger.info("Cannot process webhook: IB is down")
         return jsonify({"ok": False, "error": "ib_down"}), 503
     try:
         payload = request.get_json(force=True, silent=False) or {}
