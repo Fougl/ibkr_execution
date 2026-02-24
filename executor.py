@@ -202,6 +202,7 @@ def get_ib(raise_on_failure: bool = False):
                 clientId=cid,
                 timeout=IB_CONNECT_TIMEOUT_SEC,
             )
+            ib.runAsync()
             IB_INSTANCE = ib
             logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
             return IB_INSTANCE
@@ -1281,12 +1282,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         "client_id": 1+DERIVED_ID,
     }
     
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No loop in this thread → create a dummy one so ib_insync won't try async
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    # try:
+    #     asyncio.get_running_loop()
+    # except RuntimeError:
+    #     # No loop in this thread → create a dummy one so ib_insync won't try async
+    #     loop = asyncio.new_event_loop()
+    #     asyncio.set_event_loop(loop)
 
     try:
         
