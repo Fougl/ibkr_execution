@@ -1662,6 +1662,7 @@ app = Flask(__name__)
 
 @app.post("/webhook")
 def webhook() -> Any:
+    global IB_INSTANCE
     logger.info("===HTTP /webhook received")
     ib = connect_ib_for_webhook()
     IB_INSTANCE=ib
