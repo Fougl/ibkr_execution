@@ -148,60 +148,72 @@ class IBNotReadyError(Exception):
 
 def get_ib(raise_on_failure: bool = False):
     """
-    Return a persistent IB connection. Reconnect if dropped.
-
-    - Uses EXECUTOR_START_TIME + CONNECTION_GRACE_SEC to decide
-      whether to emit [ALARM] on failures.
-    - If raise_on_failure is False, returns None on failure.
-      If raise_on_failure is True, raises IBNotReadyError on failure.
+    Robust IB connection getter:
+    - Retries IB.connect() until CONNECTION_GRACE_SEC is exceeded.
+    - After grace, logs ALARM but still keeps retrying on each webhook call.
+    - NEVER silently stops retrying.
     """
+
     global IB_INSTANCE
 
     with IB_LOCK:
-        # Already connected
+        age = time.time() - EXECUTOR_START_TIME
+
+        # If already connected
         if IB_INSTANCE and IB_INSTANCE.isConnected():
             return IB_INSTANCE
 
-        ib = IB()
         port = 4002 + DERIVED_ID
-        cid = 1 + DERIVED_ID
+        cid  = 1 + DERIVED_ID
 
+        # ⏱️ While inside grace period → keep retrying IB connect
+        if age < CONNECTION_GRACE_SEC:
+            max_attempts = int(CONNECTION_GRACE_SEC)   # ~60 attempts if grace = 60s
+
+            for attempt in range(max_attempts):
+                try:
+                    logger.info(f"Trying IB.connect() attempt {attempt+1}/{max_attempts} ...")
+                    
+                    ib = IB()
+                    ib.connect(
+                        host=IB_HOST,
+                        port=port,
+                        clientId=cid,
+                        timeout=IB_CONNECT_TIMEOUT_SEC,
+                    )
+
+                    # Connected successfully
+                    IB_INSTANCE = ib
+                    logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
+                    return IB_INSTANCE
+
+                except Exception as e:
+                    logger.warning(f"IB connect failed (attempt {attempt+1}): {e}")
+                    time.sleep(1)
+
+            # Grace period expired → fall through
+
+        # After grace period → single attempt per call, but raises ALARM
         try:
+            ib = IB()
             ib.connect(
                 host=IB_HOST,
                 port=port,
                 clientId=cid,
                 timeout=IB_CONNECT_TIMEOUT_SEC,
             )
-        except Exception as e:
-            age = time.time() - EXECUTOR_START_TIME
-            msg = (
-                f"IB connect failed host={IB_HOST} port={port} "
-                f"clientId={cid} age={age:.1f}s err={e}"
-            )
+            IB_INSTANCE = ib
+            logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
+            return IB_INSTANCE
 
-            # ⏱️ Inside grace: no [ALARM] tag
-            if age < CONNECTION_GRACE_SEC:
-                logger.warning(msg)
-            else:
-                # After grace → mark as ALARM
-                logger.error("[ALARM] " + msg)
+        except Exception as e:
+            msg = f"IB connect failed host={IB_HOST} port={port} clientId={cid} err={e}"
+            logger.error("[ALARM] " + msg)
 
             if raise_on_failure:
                 raise IBNotReadyError(str(e))
+
             return None
-
-        # If we got here, connect succeeded
-        ib.execDetailsEvent.clear()
-        ib.commissionReportEvent.clear()
-        ib.orderStatusEvent.clear()
-        ib.openOrderEvent.clear()
-
-        IB_INSTANCE = ib
-        logger.info(
-            f"[CONN] Connected to IB host={IB_HOST} port={port} clientId={cid}"
-        )
-        return IB_INSTANCE
 
 
 _account_logs = {}       # { short_name: [str, str, ...] }
