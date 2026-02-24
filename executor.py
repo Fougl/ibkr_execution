@@ -1595,11 +1595,6 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         return result
 
     except Exception as e:
-        #logger.info("error: {str(e)}")
-        result.update({"ok": False, "error": str(e)})
-        flush_account_log("WEBHOOK_EXEC")
-        return result
-    except Exception as e:
         logger.exception(f"[EXEC_ERROR] {e}")  # ← this writes full traceback to executor.log
         result.update({"ok": False, "error": str(e)})
         flush_account_log("WEBHOOK_EXEC")
