@@ -734,7 +734,7 @@ def _round_to_tick(price: float, tick: float) -> float:
     decimals = max(0, -t.as_tuple().exponent)
     return float(out.quantize(Decimal("1") if decimals == 0 else Decimal("1").scaleb(-decimals)))
 
-def get_min_tick(contract: Contract) -> float:
+def get_min_tick(IB_INSTANCE,contract: Contract) -> float:
     """
     Get ContractDetails.minTick for this contract, cached.
     Requires contract to be qualified (conId known) or at least localSymbol stable.
