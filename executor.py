@@ -143,6 +143,19 @@ IB_LOCK = threading.Lock()
 
 
 def connect_ib_for_webhook():
+    """
+    FIX: Waitress threads have no asyncio event loop → ib.connect() fails.
+    We create a dummy event loop before ib.connect().
+    """
+    # ----------------------------
+    # 🔧 Install an event loop
+    # ----------------------------
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     ib = IB()
 
     port = 4002 + DERIVED_ID
