@@ -203,8 +203,6 @@ def get_ib(raise_on_failure: bool = False):
         )
         return IB_INSTANCE
 
-_account_logs = {}       # { short_name: [str, str, ...] }
-_account_logs_lock = threading.Lock()
 
 _account_logs = {}       # { short_name: [str, str, ...] }
 _account_logs_lock = threading.Lock()
