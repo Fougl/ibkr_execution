@@ -173,12 +173,12 @@ def get_ib(raise_on_failure: bool = False):
             for attempt in range(max_attempts):
                 try:
                     logger.info(f"Trying IB.connect() attempt {attempt+1}/{max_attempts} ...")
-                    try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        # No loop in this thread → create a dummy one so ib_insync won't try async
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
+                    # try:
+                    #     asyncio.get_running_loop()
+                    # except RuntimeError:
+                    #     # No loop in this thread → create a dummy one so ib_insync won't try async
+                    #     loop = asyncio.new_event_loop()
+                    #     asyncio.set_event_loop(loop)
                     
                     ib = IB()
                     ib.connect(
