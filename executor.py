@@ -1286,12 +1286,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         "client_id": 1+DERIVED_ID,
     }
     
-    # try:
-    #     asyncio.get_running_loop()
-    # except RuntimeError:
-    #     # No loop in this thread → create a dummy one so ib_insync won't try async
-    #     loop = asyncio.new_event_loop()
-    #     asyncio.set_event_loop(loop)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop in this thread → create a dummy one so ib_insync won't try async
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     try:
         
