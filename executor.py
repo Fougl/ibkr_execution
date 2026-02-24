@@ -61,8 +61,7 @@ from ib_insync import IB, MarketOrder, Contract, Future, StopOrder, LimitOrder, 
 import asyncio
 from decimal import Decimal, ROUND_HALF_UP
 
-asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-asyncio.set_event_loop(None)
+
 # ---------------------------
 # Config (ENV)
 # ---------------------------
@@ -107,7 +106,7 @@ DEFAULT_SYMBOL_MAP = {
 
 
 EXECUTOR_START_TIME = time.time()
-CONNECTION_GRACE_SEC = 90  # seconds to suppress startup alarms
+CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
@@ -139,88 +138,49 @@ handler.setFormatter(formatter)
 
 logger.handlers = [handler]    # IMPORTANT: removes stdout handler
 logger.propagate = False
-IB_INSTANCE = None
+
 IB_LOCK = threading.Lock()
 
-class IBNotReadyError(Exception):
-    """Raised when IB gateway is not yet ready / login not completed."""
-    pass
 
-
-def get_ib(raise_on_failure: bool = False):
+def connect_ib_for_webhook():
     """
-    Robust IB connection getter:
-    - Retries IB.connect() until CONNECTION_GRACE_SEC is exceeded.
-    - After grace, logs ALARM but still keeps retrying on each webhook call.
-    - NEVER silently stops retrying.
+    FIX: Waitress threads have no asyncio event loop → ib.connect() fails.
+    We create a dummy event loop before ib.connect().
     """
+    # ----------------------------
+    # 🔧 Install an event loop
+    # ----------------------------
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    global IB_INSTANCE
+    ib = IB()
 
-    with IB_LOCK:
-        age = time.time() - EXECUTOR_START_TIME
+    port = 4002 + DERIVED_ID
+    cid  = 1 + DERIVED_ID
 
-        # If already connected
-        if IB_INSTANCE and IB_INSTANCE.isConnected():
-            return IB_INSTANCE
+    try:
+        ib.connect(
+            host='127.0.0.1',
+            port=port,
+            clientId=cid,
+            timeout=5
+        )
+        return ib
+    except Exception as e:
+        logger.error(f"[IB] Webhook-connect failed: {e}")
+        return None
 
-        port = 4002 + DERIVED_ID
-        cid  = 1 + DERIVED_ID
 
-        # ⏱️ While inside grace period → keep retrying IB connect
-        if age < CONNECTION_GRACE_SEC:
-            max_attempts = int(CONNECTION_GRACE_SEC)   # ~60 attempts if grace = 60s
+def disconnect_ib(ib: IB):
+    try:
+        if ib and ib.isConnected():
+            ib.disconnect()
+    except:
+        pass
 
-            for attempt in range(max_attempts):
-                try:
-                    logger.info(f"Trying IB.connect() attempt {attempt+1}/{max_attempts} ...")
-                    # try:
-                    #     asyncio.get_running_loop()
-                    # except RuntimeError:
-                    #     # No loop in this thread → create a dummy one so ib_insync won't try async
-                    #     loop = asyncio.new_event_loop()
-                    #     asyncio.set_event_loop(loop)
-                    
-                    ib = IB()
-                    ib.connect(
-                        host=IB_HOST,
-                        port=port,
-                        clientId=cid,
-                        timeout=IB_CONNECT_TIMEOUT_SEC,
-                    )
-
-                    # Connected successfully
-                    IB_INSTANCE = ib
-                    logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
-                    return IB_INSTANCE
-
-                except Exception as e:
-                    logger.warning(f"IB connect failed (attempt {attempt+1}): {e}")
-                    time.sleep(2)
-
-            # Grace period expired → fall through
-
-        # After grace period → single attempt per call, but raises ALARM
-        try:
-            ib = IB()
-            ib.connect(
-                host=IB_HOST,
-                port=port,
-                clientId=cid,
-                timeout=IB_CONNECT_TIMEOUT_SEC,
-            )
-            IB_INSTANCE = ib
-            logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
-            return IB_INSTANCE
-
-        except Exception as e:
-            msg = f"IB connect failed host={IB_HOST} port={port} clientId={cid} err={e}"
-            logger.error("[ALARM] " + msg)
-
-            if raise_on_failure:
-                raise IBNotReadyError(str(e))
-
-            return None
 
 _account_logs = {}       # { short_name: [str, str, ...] }
 _account_logs_lock = threading.Lock()
@@ -670,7 +630,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
 
 
 
-def cancel_all_open_orders(reason="", symbol=None, contract=None):
+def cancel_all_open_orders(IB_INSTANCE,reason="", symbol=None, contract=None):
     log_step( f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
@@ -704,7 +664,7 @@ def cancel_all_open_orders(reason="", symbol=None, contract=None):
 
 
 
-def current_position_qty(contract: Contract) -> int:
+def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
     qty = 0
     for p in IB_INSTANCE.positions():
         try:
@@ -719,7 +679,7 @@ def current_position_qty(contract: Contract) -> int:
     return qty
 
 
-def close_position(contract: Contract, qty: int) -> None:
+def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
     action = "SELL" if qty > 0 else "BUY"
     log_step( f"CLOSE_POSITION: sending {action} {abs(qty)}")
     log_step(
@@ -747,7 +707,7 @@ def close_position(contract: Contract, qty: int) -> None:
         IB_INSTANCE.reqPositions()
         IB_INSTANCE.waitOnUpdate(timeout=0.5)
 
-        remaining = current_position_qty(contract)
+        remaining = current_position_qty(IB_INSTANCE,contract)
         if remaining == 0:
             log_step( f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
             return
@@ -774,7 +734,7 @@ def _round_to_tick(price: float, tick: float) -> float:
     decimals = max(0, -t.as_tuple().exponent)
     return float(out.quantize(Decimal("1") if decimals == 0 else Decimal("1").scaleb(-decimals)))
 
-def get_min_tick(contract: Contract) -> float:
+def get_min_tick(IB_INSTANCE,contract: Contract) -> float:
     """
     Get ContractDetails.minTick for this contract, cached.
     Requires contract to be qualified (conId known) or at least localSymbol stable.
@@ -796,6 +756,7 @@ def get_min_tick(contract: Contract) -> float:
     # Ask IB for ContractDetails
     try:
         details = IB_INSTANCE.reqContractDetails(contract)
+        IB_INSTANCE.waitOnUpdate(timeout=2)
         if not details:
             raise RuntimeError("reqContractDetails returned empty")
         mt = float(details[0].minTick)
@@ -810,7 +771,7 @@ def get_min_tick(contract: Contract) -> float:
     return mt
 
     
-def open_position_with_brackets(
+def open_position_with_brackets(IB_INSTANCE,
     contract: Contract,
     direction: int,
     qty: int,
@@ -866,7 +827,7 @@ def open_position_with_brackets(
         tp_price = fill_price * (1 - tp_pct)
         sl_price = fill_price * (1 + sl_pct)
 
-    tick = get_min_tick(contract)
+    tick = get_min_tick(IB_INSTANCE,contract)
     tp_price = _round_to_tick(tp_price, tick)
     sl_price = _round_to_tick(sl_price, tick)
 
@@ -905,9 +866,9 @@ def open_position_with_brackets(
 
 
 
-def wait_until_flat(contract: Contract, settings: Settings) -> bool:
+def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool:
     for i in range(MAX_STATE_CHECKS):
-        qty = current_position_qty(contract)
+        qty = current_position_qty(IB_INSTANCE, contract)
         if qty == 0:
             return True
         #logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
@@ -919,7 +880,7 @@ def wait_until_flat(contract: Contract, settings: Settings) -> bool:
 # ---------------------------
 # Pre-close / post-open logic (ONLY runs when webhook arrives)
 # ---------------------------
-def ensure_preclose_close_if_needed(settings: Settings) -> None:
+def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
     now_local = now_in_market_tz(settings)
 
     dayk = state_key_for_day(now_local.date())
@@ -987,7 +948,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
                     "currency": getattr(c, "currency", None),
                 })
 
-            cancel_all_open_orders(reason="preclose")
+            cancel_all_open_orders(IB_INSTANCE, reason="preclose")
 
         # =======================================================
         # BUILD MAP FOR CORRECT CONTRACT PAIRING BY conId
@@ -1055,7 +1016,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
                     f"Preclose: acct={ACCOUNT_SHORT_NAME} closing {c.secType} {c.symbol} conId={cid} exch={getattr(c,'exchange',None)} qty={q}"
                 )
 
-                close_position(c, q)
+                close_position(IB_INSTANCE,c, q)
 
         #IB_INSTANCE.disconnect()
 
@@ -1088,7 +1049,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
         
 
 
-def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
+def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
     
     now_local = now_in_market_tz(settings)
 
@@ -1188,7 +1149,7 @@ def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
                 f"tp={tp_price} sl={sl_price}"
             )
 
-            open_position_with_brackets(
+            open_position_with_brackets(IB_INSTANCE,
                 c,
                 direction,
                 qty,
@@ -1260,7 +1221,7 @@ def parse_timestamp(value) -> float | None:
 # ---------------------------
 # Per-account signal execution
 # ---------------------------
-def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any]:
+def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> Dict[str, Any]:
     
     if not IB_INSTANCE.isConnected():
         log_step( "IB_NOT_CONNECTED")
@@ -1293,7 +1254,6 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
     #     # No loop in this thread → create a dummy one so ib_insync won't try async
     #     loop = asyncio.new_event_loop()
     #     asyncio.set_event_loop(loop)
-    asyncio.set_event_loop(None)
 
     try:
         
@@ -1333,7 +1293,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         contract = qualified[0]
 
 
-        qty = current_position_qty(contract)
+        qty = current_position_qty(IB_INSTANCE,contract)
         logger.info(f"two")
         log_step( "#############STATE CHECK######################")
         if qty != 0:
@@ -1406,7 +1366,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
             #logger.info(f"[EXEC] Branch=EXIT acct={ACCOUNT_SHORT_NAME} current_qty={qty}")
-            cancel_all_open_orders(
+            cancel_all_open_orders(IB_INSTANCE,
                 reason="exit_signal",
                 contract=contract
             )
@@ -1419,11 +1379,11 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
                 return result
 
             # Close existing position
-            close_position(contract, qty)
+            close_position(IB_INSTANCE, contract, qty)
             time.sleep(1)
 
             # Retry logic
-            if not wait_until_flat( contract, settings):
+            if not wait_until_flat(IB_INSTANCE, contract, settings):
                 log_step( "Exit close not reflected — retrying")
                 #close_position(contract, qty)
                 time.sleep(1)
@@ -1459,12 +1419,12 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step( f"[EXEC] Opposite direction singal: Closing position and opening new one.")
-            close_position(contract, qty)
-            cancel_all_open_orders(reason="before_reversal_entry",  contract=contract)
+            close_position(IB_INSTANCE,contract, qty)
+            cancel_all_open_orders(IB_INSTANCE,reason="before_reversal_entry",  contract=contract)
             time.sleep(1)
 
             # Retry close
-            if not wait_until_flat(contract, settings):
+            if not wait_until_flat(IB_INSTANCE,contract, settings):
                 log_step( "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
                 #close_position(contract, qty)
                 time.sleep(1)
@@ -1508,7 +1468,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
             # Fresh enough → open reversed position
             time.sleep(max(1, int(settings.delay_sec)))
 
-            open_position_with_brackets(
+            open_position_with_brackets(IB_INSTANCE,
                 contract,
                 desired_dir,
                 desired_qty,
@@ -1536,7 +1496,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         # ----------------------------------------------------------
         if qty == 0:
             # Skip stale entries
-            cancel_all_open_orders(reason="before_new_entry", contract=contract)
+            cancel_all_open_orders(IB_INSTANCE,reason="before_new_entry", contract=contract)
             if not allow_entry:
                 result.update({
                     "ok": True,
@@ -1564,7 +1524,7 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
             # Fresh entry → open position
             #time.sleep(max(0, int(settings.execution_delay)))
             
-            open_position_with_brackets(
+            open_position_with_brackets(IB_INSTANCE,
                 contract,
                 desired_dir,
                 desired_qty,
@@ -1597,12 +1557,15 @@ def execute_signal_for_account(sig: Signal, settings: Settings) -> Dict[str, Any
         return result
 
     except Exception as e:
-        logger.info(f"[EXEC_ERROR] {e}")  # ← this writes full traceback to executor.log
+        #logger.info("error: {str(e)}")
         result.update({"ok": False, "error": str(e)})
         flush_account_log("WEBHOOK_EXEC")
         return result
+    finally:
+        flush_account_log("WEBHOOK_EXEC")
 
 def background_scheduler_loop():
+    IB_INSTANCE=None
     """
     Market-aware scheduler:
       - Runs ensure_preclose_close_if_needed() once per market day
@@ -1650,7 +1613,7 @@ def background_scheduler_loop():
                     #accounts = secrets_cache.get_accounts()
                     #logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     #if accounts:
-                    ensure_preclose_close_if_needed(settings)
+                    ensure_preclose_close_if_needed(IB_INSTANCE,settings)
                     last_preclose_run_day = market_day
 
             # ==========================================
@@ -1662,7 +1625,7 @@ def background_scheduler_loop():
                     #accounts = secrets_cache.get_accounts()
                     #logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     #if accounts:
-                    ensure_postopen_reopen_if_needed(settings)
+                    ensure_postopen_reopen_if_needed(IB_INSTANCE,settings)
                     last_postopen_run_day = market_day
 
         except Exception as e:
@@ -1691,7 +1654,7 @@ def start_scheduler():
 # START scheduler on module import (works with Waitress)
 
 start_scheduler()
-get_ib()
+#start_ib_connection()  
 # ---------------------------
 # Flask app
 # ---------------------------
@@ -1701,7 +1664,13 @@ app = Flask(__name__)
 
 @app.post("/webhook")
 def webhook() -> Any:
+    #global IB_INSTANCE
     logger.info("===HTTP /webhook received")
+    ib = connect_ib_for_webhook()
+    IB_INSTANCE=ib
+    if ib is None or not ib.isConnected():
+        logger.error("Cannot process webhook: IB is down")
+        return jsonify({"ok": False, "error": "ib_down"}), 503
     try:
         payload = request.get_json(force=True, silent=False) or {}
     except Exception:
@@ -1734,13 +1703,23 @@ def webhook() -> Any:
 
         
 
-        result = execute_signal_for_account(sig, settings)
+        result = execute_signal_for_account(IB_INSTANCE, sig, settings)
         return jsonify({"ok": result["ok"], "result": result}), 200
 
 
     except Exception as e:
         logger.exception(f"Webhook handling failed. payload={payload} err={e}")
         return jsonify({"ok": False, "error": str(e)}), 400
+    finally:
+       # 🔥 CRITICAL — disconnect exactly once
+       try:
+           if IB_INSTANCE and IB_INSTANCE.isConnected():
+               IB_INSTANCE.disconnect()
+               logger.info("[IB] Clean disconnect after webhook")
+       except Exception:
+           pass
+
+       IB_INSTANCE = None  # cleanup
 
 
 # --------------------------------------------------------------------
