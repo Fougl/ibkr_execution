@@ -1718,7 +1718,7 @@ def webhook() -> Any:
                logger.info("[IB] Clean disconnect after webhook")
        except Exception:
            pass
-
+       logger.info("[IB] Clean disconnect after webhook")
        IB_INSTANCE = None  # cleanup
 
 
