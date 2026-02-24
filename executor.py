@@ -1651,7 +1651,7 @@ def start_scheduler():
 
 # START scheduler on module import (works with Waitress)
 
-#start_scheduler()
+start_scheduler()
 #start_ib_connection()  
 # ---------------------------
 # Flask app
