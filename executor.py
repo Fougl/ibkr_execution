@@ -146,75 +146,84 @@ class IBNotReadyError(Exception):
     pass
 
 
-def get_ib(raise_on_failure: bool = False):
+def start_ib_connection_in_background():
     """
-    Robust IB connection getter:
-    - Retries IB.connect() until CONNECTION_GRACE_SEC is exceeded.
-    - After grace, logs ALARM but still keeps retrying on each webhook call.
-    - NEVER silently stops retrying.
+    Launch a dedicated IB thread that:
+      - Tries to connect repeatedly during grace period
+      - After grace: does a single attempt per cycle (with ALARM)
+      - Once connected: starts ib.run() which is REQUIRED for ib_insync
     """
 
-    global IB_INSTANCE
-
-    with IB_LOCK:
-        age = time.time() - EXECUTOR_START_TIME
-
-        # If already connected
-        if IB_INSTANCE and IB_INSTANCE.isConnected():
-            return IB_INSTANCE
+    def _ib_thread_loop():
+        global IB_INSTANCE
 
         port = 4002 + DERIVED_ID
         cid  = 1 + DERIVED_ID
 
-        # ⏱️ While inside grace period → keep retrying IB connect
-        if age < CONNECTION_GRACE_SEC:
-            max_attempts = int(CONNECTION_GRACE_SEC)   # ~60 attempts if grace = 60s
+        logger.info(f"[IB_THREAD] Starting persistent IB connector for port={port} cid={cid}")
 
-            for attempt in range(max_attempts):
-                try:
-                    logger.info(f"Trying IB.connect() attempt {attempt+1}/{max_attempts} ...")
-                    
-                    ib = IB()
-                    ib.connect(
-                        host=IB_HOST,
-                        port=port,
-                        clientId=cid,
-                        timeout=IB_CONNECT_TIMEOUT_SEC,
-                    )
+        while True:
+            age = time.time() - EXECUTOR_START_TIME
 
-                    # Connected successfully
-                    IB_INSTANCE = ib
-                    logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
-                    return IB_INSTANCE
+            # -------------------------------
+            # GRACE PERIOD → continuous retry
+            # -------------------------------
+            if age < CONNECTION_GRACE_SEC:
+                max_attempts = int(CONNECTION_GRACE_SEC)
+                for attempt in range(max_attempts):
+                    try:
+                        logger.info(f"[IB_THREAD] Grace retry {attempt+1}/{max_attempts} connecting to {IB_HOST}:{port} ...")
 
-                except Exception as e:
-                    logger.warning(f"IB connect failed (attempt {attempt+1}): {e}")
-                    time.sleep(2)
+                        ib = IB()
+                        ib.connect(
+                            host=IB_HOST,
+                            port=port,
+                            clientId=cid,
+                            timeout=IB_CONNECT_TIMEOUT_SEC,
+                        )
 
-            # Grace period expired → fall through
+                        IB_INSTANCE = ib
+                        logger.info(f"[IB_THREAD] CONNECTED during grace → starting IB event loop")
 
-        # After grace period → single attempt per call, but raises ALARM
-        try:
-            ib = IB()
-            ib.connect(
-                host=IB_HOST,
-                port=port,
-                clientId=cid,
-                timeout=IB_CONNECT_TIMEOUT_SEC,
-            )
-            ib.runAsync()
-            IB_INSTANCE = ib
-            logger.info(f"[CONN] Connected to IB on {IB_HOST}:{port} cid={cid}")
-            return IB_INSTANCE
+                        # ***** CRITICAL *****
+                        ib.run()     # EVENT LOOP FOREVER
+                        return       # if event loop exits, restart outer loop
 
-        except Exception as e:
-            msg = f"IB connect failed host={IB_HOST} port={port} clientId={cid} err={e}"
-            logger.error("[ALARM] " + msg)
+                    except Exception as e:
+                        logger.warning(f"[IB_THREAD] Grace attempt failed: {e}")
+                        time.sleep(2)
 
-            if raise_on_failure:
-                raise IBNotReadyError(str(e))
+                # Grace expired → fall through to normal loop
 
-            return None
+            # -------------------------------
+            # AFTER GRACE → single attempt
+            # -------------------------------
+            try:
+                logger.info(f"[IB_THREAD] Post-grace connect attempt to {IB_HOST}:{port}")
+
+                ib = IB()
+                ib.connect(
+                    host=IB_HOST,
+                    port=port,
+                    clientId=cid,
+                    timeout=IB_CONNECT_TIMEOUT_SEC,
+                )
+
+                IB_INSTANCE = ib
+                logger.info(f"[IB_THREAD] CONNECTED → starting IB event loop")
+
+                ib.run()      # event loop forever
+                return
+
+            except Exception as e:
+                logger.error(f"[IB_THREAD][ALARM] connect failed: {e}")
+                time.sleep(3)   # retry every 3 seconds forever
+
+    # --------------------------------------
+    # Spawn the background daemon thread
+    # --------------------------------------
+    t = threading.Thread(target=_ib_thread_loop, daemon=True)
+    t.start()
 
 
 _account_logs = {}       # { short_name: [str, str, ...] }
@@ -1687,7 +1696,7 @@ def start_scheduler():
 # START scheduler on module import (works with Waitress)
 
 start_scheduler()
-get_ib()
+start_ib_connection_in_background()  
 # ---------------------------
 # Flask app
 # ---------------------------
