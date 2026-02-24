@@ -150,11 +150,11 @@ def connect_ib_for_webhook():
     # ----------------------------
     # 🔧 Install an event loop
     # ----------------------------
-    # try:
-    #     asyncio.get_running_loop()
-    # except RuntimeError:
-    #     loop = asyncio.new_event_loop()
-    #     asyncio.set_event_loop(loop)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     ib = IB()
 
@@ -756,6 +756,7 @@ def get_min_tick(contract: Contract) -> float:
     # Ask IB for ContractDetails
     try:
         details = IB_INSTANCE.reqContractDetails(contract)
+        IB_INSTANCE.waitOnUpdate(timeout=2)
         if not details:
             raise RuntimeError("reqContractDetails returned empty")
         mt = float(details[0].minTick)
