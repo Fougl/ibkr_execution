@@ -138,7 +138,7 @@ handler.setFormatter(formatter)
 
 logger.handlers = [handler]    # IMPORTANT: removes stdout handler
 logger.propagate = False
-IB_INSTANCE = None
+
 IB_LOCK = threading.Lock()
 
 
@@ -880,7 +880,7 @@ def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool
 # ---------------------------
 # Pre-close / post-open logic (ONLY runs when webhook arrives)
 # ---------------------------
-def ensure_preclose_close_if_needed(settings: Settings) -> None:
+def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
     now_local = now_in_market_tz(settings)
 
     dayk = state_key_for_day(now_local.date())
@@ -1049,7 +1049,7 @@ def ensure_preclose_close_if_needed(settings: Settings) -> None:
         
 
 
-def ensure_postopen_reopen_if_needed(settings: Settings) -> None:
+def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
     
     now_local = now_in_market_tz(settings)
 
@@ -1565,6 +1565,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         flush_account_log("WEBHOOK_EXEC")
 
 def background_scheduler_loop():
+    IB_INSTANCE=None
     """
     Market-aware scheduler:
       - Runs ensure_preclose_close_if_needed() once per market day
@@ -1612,7 +1613,7 @@ def background_scheduler_loop():
                     #accounts = secrets_cache.get_accounts()
                     #logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     #if accounts:
-                    ensure_preclose_close_if_needed(settings)
+                    ensure_preclose_close_if_needed(IB_INSTANCE,settings)
                     last_preclose_run_day = market_day
 
             # ==========================================
@@ -1624,7 +1625,7 @@ def background_scheduler_loop():
                     #accounts = secrets_cache.get_accounts()
                     #logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     #if accounts:
-                    ensure_postopen_reopen_if_needed(settings)
+                    ensure_postopen_reopen_if_needed(IB_INSTANCE,settings)
                     last_postopen_run_day = market_day
 
         except Exception as e:
