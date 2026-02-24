@@ -424,6 +424,13 @@ def market_datetimes(now_local: datetime, settings: Settings):
 
 def in_trading_window(now_local: datetime, settings: Settings) -> bool:
     open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
+
+    # DEBUG LOGGING
+    logger.info(f"[TIMECHK] now_local={now_local.isoformat()}")
+    logger.info(f"[TIMECHK] open_dt={open_dt.isoformat()}")
+    logger.info(f"[TIMECHK] close_dt={close_dt.isoformat()}")
+    logger.info(f"[TIMECHK] RESULT={open_dt <= now_local <= close_dt}")
+
     return open_dt <= now_local <= close_dt
 
 
