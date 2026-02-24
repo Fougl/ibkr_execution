@@ -753,19 +753,20 @@ def get_active_executor_shortnames() -> list[str]:
 
 def ensure_executor_service(broker: str, short_name: str) -> None:
     derived_id = derive_id_from_name(short_name)
-    executor_port = 5001 + derived_id
+    derived_id2=derive_id_from_name(f"{broker}/{short_name}")
+    executor_port = 5001 + derived_id2
 
     unit_name = f"executor-{broker}-{short_name}.service"
     unit_path = f"/etc/systemd/system/{unit_name}"
 
-    # Create service if missing
-    if not os.path.exists(unit_path):
-        content = f"""[Unit]
+    # # Create service if missing
+    # if not os.path.exists(unit_path):
+    content = f"""[Unit]
 Description=IBKR Executor for {short_name}
 After=network-online.target
 Wants=network-online.target
-PartOf=ibc-<broker>-<short>.service
-BindsTo=ibc-<broker>-<short>.service
+PartOf=ibc-{broker}-{short_name}.service
+BindsTo=ibc-{broker}-{short_name}.service
 
 [Service]
 Type=simple
@@ -785,15 +786,15 @@ KillSignal=SIGTERM
 [Install]
 WantedBy=multi-user.target
 """
-        with open(unit_path, "w", encoding="utf-8") as f:
-            f.write(content)
+    with open(unit_path, "w", encoding="utf-8") as f:
+        f.write(content)
 
-        subprocess.run(["systemctl", "daemon-reload"], check=False)
-        subprocess.run(["systemctl", "enable", unit_name], check=False)
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "enable", unit_name], check=False)
 
-        # First-time start
-        subprocess.run(["systemctl", "start", unit_name], check=False)
-        return
+    # First-time start
+    subprocess.run(["systemctl", "start", unit_name], check=False)
+    return
 
     # If service exists → ALWAYS restart it
     subprocess.run(["systemctl", "restart", unit_name], check=False)
@@ -968,7 +969,7 @@ def webhook_broker_account(broker: str, short_name: str):
 
     try:
         # NEW: derive ID from broker + short_name
-        combined = f"{broker}_{short_name}"
+        combined = f"{broker}/{short_name}"
         derived_id = derive_id_from_name(combined)
 
         port = 5001 + derived_id

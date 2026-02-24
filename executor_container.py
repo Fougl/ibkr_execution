@@ -106,7 +106,7 @@ DEFAULT_SYMBOL_MAP = {
 
 
 EXECUTOR_START_TIME = time.time()
-CONNECTION_GRACE_SEC = 90  # seconds to suppress startup alarms
+CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
@@ -141,36 +141,67 @@ logger.propagate = False
 IB_INSTANCE = None
 IB_LOCK = threading.Lock()
 
-def get_ib():
-    """Return a persistent IB connection. Reconnect if dropped."""
+
+class IBNotReadyError(Exception):
+    """Raised when IB gateway is not yet ready / login not completed."""
+    pass
+
+
+def get_ib(raise_on_failure: bool = False):
+    """
+    Return a persistent IB connection. Reconnect if dropped.
+
+    - Uses EXECUTOR_START_TIME + CONNECTION_GRACE_SEC to decide
+      whether to emit [ALARM] on failures.
+    - If raise_on_failure is False, returns None on failure.
+      If raise_on_failure is True, raises IBNotReadyError on failure.
+    """
     global IB_INSTANCE
 
     with IB_LOCK:
-        # If already connected
+        # Already connected
         if IB_INSTANCE and IB_INSTANCE.isConnected():
             return IB_INSTANCE
 
-        # Create new instance
         ib = IB()
+        port = 4002 + DERIVED_ID
+        cid = 1 + DERIVED_ID
+
         try:
             ib.connect(
                 host=IB_HOST,
-                port=4002+DERIVED_ID,
-                clientId=1+DERIVED_ID,
-                timeout=IB_CONNECT_TIMEOUT_SEC
+                port=port,
+                clientId=cid,
+                timeout=IB_CONNECT_TIMEOUT_SEC,
             )
         except Exception as e:
-            logger.info(f"[ALARM] Initial IB connect failed: {e}")
-            raise
+            age = time.time() - EXECUTOR_START_TIME
+            msg = (
+                f"IB connect failed host={IB_HOST} port={port} "
+                f"clientId={cid} age={age:.1f}s err={e}"
+            )
 
-        # Clear noisy handlers
+            # ⏱️ Inside grace: no [ALARM] tag
+            if age < CONNECTION_GRACE_SEC:
+                logger.warning(msg)
+            else:
+                # After grace → mark as ALARM
+                logger.error("[ALARM] " + msg)
+
+            if raise_on_failure:
+                raise IBNotReadyError(str(e))
+            return None
+
+        # If we got here, connect succeeded
         ib.execDetailsEvent.clear()
         ib.commissionReportEvent.clear()
         ib.orderStatusEvent.clear()
         ib.openOrderEvent.clear()
 
         IB_INSTANCE = ib
-        logger.info(f"[CONN] Connected to IB at port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
+        logger.info(
+            f"[CONN] Connected to IB host={IB_HOST} port={port} clientId={cid}"
+        )
         return IB_INSTANCE
 
 _account_logs = {}       # { short_name: [str, str, ...] }
