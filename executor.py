@@ -827,9 +827,9 @@ def open_position_with_brackets(
         tp_price = fill_price * (1 - tp_pct)
         sl_price = fill_price * (1 + sl_pct)
 
-    # tick = get_min_tick(contract, ACCOUNT_SHORT_NAME)
-    # tp_price = _round_to_tick(tp_price, tick)
-    # sl_price = _round_to_tick(sl_price, tick)
+    tick = get_min_tick(contract, ACCOUNT_SHORT_NAME)
+    tp_price = _round_to_tick(tp_price, tick)
+    sl_price = _round_to_tick(sl_price, tick)
 
 
     log_step( f"TP_PRICE: {tp_price}")
