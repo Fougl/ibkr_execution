@@ -148,33 +148,40 @@ class IBNotReadyError(Exception):
 
 def start_ib_connection_in_background():
     """
-    Launch a dedicated IB thread that:
-      - Tries to connect repeatedly during grace period
-      - After grace: does a single attempt per cycle (with ALARM)
-      - Once connected: starts ib.run() which is REQUIRED for ib_insync
+    IB thread with its own asyncio event loop.
+    Keeps reconnecting forever. Fully compatible with ib_insync.
     """
 
-    def _ib_thread_loop():
+    def _thread_main():
+        import asyncio
         global IB_INSTANCE
+
+        # Create event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         port = 4002 + DERIVED_ID
         cid  = 1 + DERIVED_ID
 
-        logger.info(f"[IB_THREAD] Starting persistent IB connector for port={port} cid={cid}")
+        logger.info(f"[IB_THREAD] Event loop created for acct={ACCOUNT_SHORT_NAME} port={port} cid={cid}")
 
-        while True:
-            age = time.time() - EXECUTOR_START_TIME
+        async def connect_and_run():
+            nonlocal loop
+            avg_retry_sleep = 2
 
-            # -------------------------------
-            # GRACE PERIOD → continuous retry
-            # -------------------------------
-            if age < CONNECTION_GRACE_SEC:
+            while True:
+                age = time.time() - EXECUTOR_START_TIME
+
+                # Grace period = continuous retry
                 max_attempts = int(CONNECTION_GRACE_SEC)
-                for attempt in range(max_attempts):
+                attempts = max_attempts if age < CONNECTION_GRACE_SEC else 1
+
+                for attempt in range(attempts):
                     try:
-                        logger.info(f"[IB_THREAD] Grace retry {attempt+1}/{max_attempts} connecting to {IB_HOST}:{port} ...")
+                        logger.info(f"[IB_THREAD] Attempt {attempt+1}/{attempts} connecting to {IB_HOST}:{port}")
 
                         ib = IB()
+                        # ib.connect is sync-friendly but safe inside loop thread
                         ib.connect(
                             host=IB_HOST,
                             port=port,
@@ -183,46 +190,20 @@ def start_ib_connection_in_background():
                         )
 
                         IB_INSTANCE = ib
-                        logger.info(f"[IB_THREAD] CONNECTED during grace → starting IB event loop")
+                        logger.info(f"[IB_THREAD] CONNECTED → starting ib.run()")
 
-                        # ***** CRITICAL *****
-                        ib.run()     # EVENT LOOP FOREVER
-                        return       # if event loop exits, restart outer loop
+                        await ib.runAsync()      # <---- THIS IS THE CORRECT WAY
+                        logger.warning("[IB_THREAD] ib.runAsync() returned unexpectedly; reconnecting...")
 
                     except Exception as e:
-                        logger.warning(f"[IB_THREAD] Grace attempt failed: {e}")
-                        time.sleep(2)
+                        logger.warning(f"[IB_THREAD] Connect failed: {e}")
+                        await asyncio.sleep(avg_retry_sleep)
 
-                # Grace expired → fall through to normal loop
+        # Start async loop
+        loop.run_until_complete(connect_and_run())
 
-            # -------------------------------
-            # AFTER GRACE → single attempt
-            # -------------------------------
-            try:
-                logger.info(f"[IB_THREAD] Post-grace connect attempt to {IB_HOST}:{port}")
-
-                ib = IB()
-                ib.connect(
-                    host=IB_HOST,
-                    port=port,
-                    clientId=cid,
-                    timeout=IB_CONNECT_TIMEOUT_SEC,
-                )
-
-                IB_INSTANCE = ib
-                logger.info(f"[IB_THREAD] CONNECTED → starting IB event loop")
-
-                ib.run()      # event loop forever
-                return
-
-            except Exception as e:
-                logger.error(f"[IB_THREAD][ALARM] connect failed: {e}")
-                time.sleep(3)   # retry every 3 seconds forever
-
-    # --------------------------------------
-    # Spawn the background daemon thread
-    # --------------------------------------
-    t = threading.Thread(target=_ib_thread_loop, daemon=True)
+    # Launch daemon thread
+    t = threading.Thread(target=_thread_main, daemon=True)
     t.start()
 
 
