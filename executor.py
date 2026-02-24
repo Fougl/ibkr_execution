@@ -1690,7 +1690,9 @@ def webhook() -> Any:
         payload = {}
 
     try:
+        logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         settings = settings_cache.get()
+        logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         sig = parse_signal(payload)
         logger.info(f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
