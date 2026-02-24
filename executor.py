@@ -145,66 +145,45 @@ class IBNotReadyError(Exception):
     """Raised when IB gateway is not yet ready / login not completed."""
     pass
 
-
-def start_ib_connection_in_background():
+def ensure_ib_loop_running(ib: IB):
     """
-    IB thread with its own asyncio event loop.
-    Keeps reconnecting forever. Fully compatible with ib_insync.
+    Start the ib_insync event loop in a background thread exactly once.
+    Needed so qualifyContracts() and others never hang.
     """
+    if ib._thread and ib._thread.is_alive():
+        return  # already running
 
-    def _thread_main():
-        import asyncio
-        global IB_INSTANCE
-
-        # Create event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        port = 4002 + DERIVED_ID
-        cid  = 1 + DERIVED_ID
-
-        logger.info(f"[IB_THREAD] Event loop created for acct={ACCOUNT_SHORT_NAME} port={port} cid={cid}")
-
-        async def connect_and_run():
-            nonlocal loop
-            avg_retry_sleep = 2
-
-            while True:
-                age = time.time() - EXECUTOR_START_TIME
-
-                # Grace period = continuous retry
-                max_attempts = int(CONNECTION_GRACE_SEC)
-                attempts = max_attempts if age < CONNECTION_GRACE_SEC else 1
-
-                for attempt in range(attempts):
-                    try:
-                        logger.info(f"[IB_THREAD] Attempt {attempt+1}/{attempts} connecting to {IB_HOST}:{port}")
-
-                        ib = IB()
-                        # ib.connect is sync-friendly but safe inside loop thread
-                        ib.connect(
-                            host=IB_HOST,
-                            port=port,
-                            clientId=cid,
-                            timeout=IB_CONNECT_TIMEOUT_SEC,
-                        )
-
-                        IB_INSTANCE = ib
-                        logger.info(f"[IB_THREAD] CONNECTED → starting ib.run()")
-
-                        await ib.runAsync()      # <---- THIS IS THE CORRECT WAY
-                        logger.warning("[IB_THREAD] ib.runAsync() returned unexpectedly; reconnecting...")
-
-                    except Exception as e:
-                        logger.warning(f"[IB_THREAD] Connect failed: {e}")
-                        await asyncio.sleep(avg_retry_sleep)
-
-        # Start async loop
-        loop.run_until_complete(connect_and_run())
-
-    # Launch daemon thread
-    t = threading.Thread(target=_thread_main, daemon=True)
+    import threading
+    t = threading.Thread(target=ib.run, daemon=True)
     t.start()
+    logger.info("[IB] Background event loop started")
+    
+def start_ib_connection():
+    global IB_INSTANCE
+
+    port = 4002 + DERIVED_ID
+    cid  = 1 + DERIVED_ID
+
+    while True:
+        try:
+            logger.info(f"[IB] Connecting to {IB_HOST}:{port} cid={cid} ...")
+            ib = IB()
+            ib.connect(
+                host=IB_HOST,
+                port=port,
+                clientId=cid,
+                timeout=IB_CONNECT_TIMEOUT_SEC,
+            )
+
+            # ⭐ REQUIRED ⭐
+            ensure_ib_loop_running(ib)
+
+            IB_INSTANCE = ib
+            logger.info(f"[IB] CONNECTED + LOOP RUNNING on {IB_HOST}:{port} cid={cid}")
+            return
+        except Exception as e:
+            logger.warning(f"[IB] Connection failed: {e}; retrying in 1 sec")
+            time.sleep(1)
 
 
 _account_logs = {}       # { short_name: [str, str, ...] }
@@ -1677,7 +1656,7 @@ def start_scheduler():
 # START scheduler on module import (works with Waitress)
 
 start_scheduler()
-start_ib_connection_in_background()  
+start_ib_connection()  
 # ---------------------------
 # Flask app
 # ---------------------------
