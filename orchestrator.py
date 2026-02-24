@@ -466,7 +466,7 @@ def run_script(script_path: str, env: dict) -> subprocess.Popen:
         start_new_session=True,
     )
 
-
+    
 def apply_account_added(args, secret_name: str) -> None:
     secret = load_secret(args.region, secret_name)
 
@@ -486,25 +486,15 @@ def apply_account_added(args, secret_name: str) -> None:
         return
 
     short_name = short_name_from_secret_name(secret_name)
-
-    paths = build_account_paths(args.accounts_base, short_name)
-    os.makedirs(paths["base_dir"], exist_ok=True)
-
-    # Write config.ini
-    cfg = render_config_ini(secret, short_name)
-    with open(paths["config_ini"], "w", encoding="utf-8") as f:
-        f.write(cfg)
-
-    # Derive port
-    derived_id = derive_id_from_name(short_name)
-    command_port = 7462 + derived_id
-
-    env = build_env(args.display, paths)
-    env["COMMAND_SERVER_PORT"] = str(command_port)
-
-    run_script(GATEWAY_START, env)
     broker = broker_from_secret_name(secret_name)
+
+    # Create/update + start the gateway systemd service
+    ensure_gateway_service(args, broker, short_name, secret)
+
+    # Ensure executor service for this account as well
+    add_cloudwatch_log_config(broker, short_name)
     ensure_executor_service(broker, short_name)
+    
 
 
 
@@ -585,6 +575,59 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     run_script(GATEWAY_START, env)
     broker = broker_from_secret_name(secret_name)
     ensure_executor_service(broker, short_name)
+    
+def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
+    entry = old_state.get(secret_name)
+    if not entry:
+        logger.warning(
+            "Secret changed: %s but no local state found – nothing to change",
+            secret_name,
+        )
+        return
+
+    short_name = short_name_from_secret_name(secret_name)
+    broker = broker_from_secret_name(secret_name)
+
+    secret = load_secret(args.region, secret_name)
+
+    ok, reason = validate_secret_json(secret_name, secret)
+    if not ok:
+        logger.error(
+            "Invalid secret JSON; skipping restart: %s reason=%s",
+            secret_name,
+            reason,
+        )
+        return
+
+    if str(secret["active"]) != "1":
+        logger.info(
+            "Secret %s inactive (active=0), stopping gateway, this will take 5 minutes",
+            secret_name,
+        )
+
+        # BEFORE stopping gateway → ask executor to flatten all positions
+        flatten_account_positions(args.executor_flatten_url, short_name)
+
+        # Stop + remove executor and gateway services after a grace period
+        stop_and_remove_executor_service(broker, short_name)
+
+        # Allow some time for flatten to complete (same as before)
+        time.sleep(300)
+
+        stop_and_remove_gateway_service(broker, short_name)
+        return
+
+    # Secret still active -> rewrite config + restart gateway service
+    logger.warning(
+        "Secret changed: %s -> restarting IBC via systemd service",
+        secret_name,
+    )
+
+    # ensure_gateway_service updates config.ini and restarts systemd unit
+    ensure_gateway_service(args, broker, short_name, secret)
+
+    # Also restart/ensure executor for this account
+    ensure_executor_service(broker, short_name)
 
 
 def short_name_from_secret_name(secret_name: str) -> str:
@@ -619,19 +662,15 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
         )
         return
 
-    # Derive short_name from secret name
     short_name = short_name_from_secret_name(secret_name)
     broker = broker_from_secret_name(secret_name)
-
 
     # BEFORE stopping gateway → ask executor to flatten all positions
     flatten_account_positions(args.executor_flatten_url, short_name)
     stop_and_remove_executor_service(broker, short_name)
 
-
-    # Deterministic port derivation (same logic as config)
     derived_id = derive_id_from_name(short_name)
-    command_port = 7462 + derived_id  # <-- FIXED base port
+    command_port = 7462 + derived_id  # kept for logging/debug
 
     logger.warning(
         "Secret removed: %s -> stopping IBC on port %s (Phase 1) - this will take 5 minutes",
@@ -639,17 +678,11 @@ def apply_account_removed(args, secret_name: str, old_state: dict) -> None:
         command_port,
     )
 
-    env = os.environ.copy()
-    env["COMMAND_SERVER_PORT"] = str(command_port)
+    # Same 5-minute grace as before
     time.sleep(300)
-    subprocess.run(
-        [GATEWAY_STOP],
-        env=env,
-        check=False,
-    )
-    #broker = broker_from_secret_name(secret_name)
-    #ensure_executor_service(broker, short_name)
 
+    # Stop + remove the gateway systemd service
+    stop_and_remove_gateway_service(broker, short_name)
 
 def force_start_or_restart_all_secrets(args) -> None:
     sm = boto3.client("secretsmanager", region_name=args.region)
@@ -661,9 +694,6 @@ def force_start_or_restart_all_secrets(args) -> None:
             secret_name = s.get("Name", "")
             if not secret_name.startswith("broker/"):
                 continue
-
-            # if args.filter.lower() not in secret_name.lower():
-            #     continue
 
             try:
                 logger.info("Ensuring gateway for secret=%s", secret_name)
@@ -683,43 +713,21 @@ def force_start_or_restart_all_secrets(args) -> None:
                     )
                     continue
 
-                # Extract short_name from secret name
                 short_name = short_name_from_secret_name(secret_name)
                 broker = broker_from_secret_name(secret_name)
 
-                # Build paths
-                paths = build_account_paths(args.accounts_base, short_name)
-                os.makedirs(paths["base_dir"], exist_ok=True)
+                # Create/update + restart gateway service
+                ensure_gateway_service(args, broker, short_name, secret)
 
-                # Always rewrite config.ini
-                cfg = render_config_ini(secret, short_name)
-                with open(paths["config_ini"], "w", encoding="utf-8") as f:
-                    f.write(cfg)
-
-                # Derive deterministic port
-                derived_id = derive_id_from_name(short_name)
-                command_port = 7462 + derived_id
-
-                # Build environment
-                env = build_env(args.display, paths)
-                env["COMMAND_SERVER_PORT"] = str(command_port)
-
-                # Start gateway
-                p = subprocess.Popen(
-                    [GATEWAY_START],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                )
+                # Ensure executor service
+                ensure_executor_service(broker, short_name)
 
                 logger.info(
-                    "Gateway start triggered for %s (pid=%s)",
+                    "Gateway service ensured for %s (%s/%s)",
                     secret_name,
-                    p.pid,
+                    broker,
+                    short_name,
                 )
-                time.sleep(20)
-                ensure_executor_service(broker, short_name)
 
             except Exception:
                 log_exception("Failed force start/restart", secret=secret_name)
@@ -755,6 +763,8 @@ def ensure_executor_service(broker: str, short_name: str) -> None:
 Description=IBKR Executor for {short_name}
 After=network-online.target
 Wants=network-online.target
+PartOf=ibc-<broker>-<short>.service
+BindsTo=ibc-<broker>-<short>.service
 
 [Service]
 Type=simple
@@ -799,6 +809,87 @@ def stop_and_remove_executor_service(broker: str, short_name: str) -> None:
         os.unlink(unit_path)
 
     subprocess.run(["systemctl", "daemon-reload"], check=False)
+    
+def ensure_gateway_service(args, broker: str, short_name: str, secret: dict) -> None:
+    """
+    Create or update a systemd service for this account's IB Gateway and ensure it is running.
+
+    Service name: ibc-<broker>-<short_name>.service
+    ExecStart:  /opt/ibc/gatewaystart.sh
+    ExecStop:   /opt/ibc/stop.sh
+    ExecReload: /opt/ibc/restart.sh
+    """
+    # Build per-account paths and config.ini
+    paths = build_account_paths(args.accounts_base, short_name)
+    os.makedirs(paths["base_dir"], exist_ok=True)
+
+    # Always rewrite config.ini based on the latest secret
+    cfg = render_config_ini(secret, short_name)
+    with open(paths["config_ini"], "w", encoding="utf-8") as f:
+        f.write(cfg)
+
+    # Deterministic command server port
+    derived_id = derive_id_from_name(short_name)
+    command_port = 7462 + derived_id
+
+    unit_name = f"ibc-{broker}-{short_name}.service"
+    unit_path = f"/etc/systemd/system/{unit_name}"
+
+    # Make sure logs/settings dirs exist
+    os.makedirs(paths["logs_dir"], exist_ok=True)
+    os.makedirs(paths["tws_settings"], exist_ok=True)
+
+    # Systemd unit content: child of ibkr-orchestrator.service
+    content = f"""[Unit]
+Description=IBKR Gateway for {broker}/{short_name}
+After=network-online.target
+Wants=network-online.target
+PartOf=ibkr-orchestrator.service
+BindsTo=ibkr-orchestrator.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/ibc
+Environment=DISPLAY={args.display}
+Environment=IBC_INI={paths["config_ini"]}
+Environment=LOG_PATH={paths["logs_dir"]}
+Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
+Environment=COMMAND_SERVER_PORT={command_port}
+ExecStart=/bin/bash -c '{GATEWAY_RESTART}; {GATEWAY_START}'
+ExecStop={GATEWAY_STOP}
+Restart=always
+RestartSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    # Write/update the unit file
+    with open(unit_path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # Reload systemd and (re)start the service
+    subprocess.run(["systemctl", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "enable", unit_name], check=False)
+    # restart always, so config/env changes are picked up
+    subprocess.run(["systemctl", "restart", unit_name], check=False)
+
+
+def stop_and_remove_gateway_service(broker: str, short_name: str) -> None:
+    """
+    Stop and disable the per-account IB Gateway service, and remove the unit file.
+    """
+    unit_name = f"ibc-{broker}-{short_name}.service"
+    unit_path = f"/etc/systemd/system/{unit_name}"
+
+    subprocess.run(["systemctl", "stop", unit_name], check=False)
+    subprocess.run(["systemctl", "disable", unit_name], check=False)
+
+    if os.path.exists(unit_path):
+        os.unlink(unit_path)
+        subprocess.run(["systemctl", "daemon-reload"], check=False)
 
 
 # ----------------------------
@@ -911,6 +1002,48 @@ def webhook_broker_account(broker: str, short_name: str):
             "account": short_name,
             "error": "orchestrator_exception"
         }), 500
+    
+def add_cloudwatch_log_config(broker: str, short_name: str) -> None:
+    """
+    Appends a new executor log entry into amazon-cloudwatch-agent.json
+    and restarts the CloudWatch agent.
+    """
+    cfg_path = "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
+
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        logger.exception("Cannot read CloudWatch agent config")
+        return
+
+    entry = {
+        "file_path": f"/opt/ibc/execution/executor-{broker}-{short_name}.log",
+        "log_group_name": "executor",
+        "log_stream_name": f"{broker}/{short_name}",
+        "timezone": "UTC",
+        "multi_line_start_pattern": "=== (HTTP|STARTING|WEBHOOK_EXEC|PRECLOSE_EXEC|POSTOPEN_EXEC)"
+    }
+
+    try:
+        collect = cfg["logs"]["logs_collected"]["files"]["collect_list"]
+
+        # Avoid duplicates
+        for c in collect:
+            if c.get("log_stream_name") == f"{broker}/{short_name}":
+                logger.info("CloudWatch entry already exists for %s/%s", broker, short_name)
+                return
+
+        collect.append(entry)
+
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+
+        logger.warning("Added CloudWatch log entry for %s/%s — restarting agent", broker, short_name)
+        subprocess.run(["systemctl", "restart", "amazon-cloudwatch-agent"], check=False)
+
+    except Exception:
+        logger.exception("Failed updating CloudWatch config for %s/%s", broker, short_name)
 
 
 def main() -> None:
