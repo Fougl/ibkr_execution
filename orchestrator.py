@@ -715,6 +715,7 @@ def force_start_or_restart_all_secrets(args) -> None:
 
                 short_name = short_name_from_secret_name(secret_name)
                 broker = broker_from_secret_name(secret_name)
+                add_cloudwatch_log_config(broker, short_name)
 
                 # Create/update + restart gateway service
                 ensure_gateway_service(args, broker, short_name, secret)
