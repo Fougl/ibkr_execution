@@ -1613,7 +1613,10 @@ def background_scheduler_loop():
                     #accounts = secrets_cache.get_accounts()
                     #logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     #if accounts:
-                    ensure_preclose_close_if_needed(IB_INSTANCE,settings)
+                    if IB_INSTANCE:
+                        ensure_preclose_close_if_needed(IB_INSTANCE,settings)
+                    else:
+                        logger.info("IB not connected")
                     last_preclose_run_day = market_day
 
             # ==========================================
@@ -1625,7 +1628,10 @@ def background_scheduler_loop():
                     #accounts = secrets_cache.get_accounts()
                     #logger.info(f"[HTTP] Accounts found={len(accounts)}")
                     #if accounts:
-                    ensure_postopen_reopen_if_needed(IB_INSTANCE,settings)
+                    if IB_INSTANCE:
+                        ensure_postopen_reopen_if_needed(IB_INSTANCE,settings)
+                    else:
+                        logger.info("IB not connected")
                     last_postopen_run_day = market_day
 
         except Exception as e:
