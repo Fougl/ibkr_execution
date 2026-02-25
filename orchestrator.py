@@ -1030,7 +1030,7 @@ def main() -> None:
 
         try:
             # Self-heal Xvfb each cycle
-            ensure_xvfb(args.display, xvfb_args)
+            #ensure_xvfb(args.display, xvfb_args)
             if os.path.exists(args.state_file):
                 old_state = read_json_file(args.state_file).get("secrets", {})
             else:
