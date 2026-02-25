@@ -785,6 +785,7 @@ Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
+Environment="JAVA_TOOL_OPTIONS=-Djava.awt.headless=false"
 ExecStart=/bin/bash -c '/opt/ibc/restart.sh; /opt/ibc/gatewaystart.sh -inline'
 ExecStop={GATEWAY_STOP}
 Restart=always
@@ -1014,11 +1015,11 @@ def main() -> None:
     xvfb_args = ["Xvfb", args.display, "-screen", "0", "1024x768x24"]
 
     # Fail-fast baseline
-    try:
-        ensure_xvfb(args.display, xvfb_args)
-    except Exception:
-        log_exception("Failed to ensure Xvfb baseline")
-        sys.exit(2)
+    # try:
+    #     ensure_xvfb(args.display, xvfb_args)
+    # except Exception:
+    #     log_exception("Failed to ensure Xvfb baseline")
+    #     sys.exit(2)
 
     logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
     # logger.warning("Cold start detected → force start/restart all gateways")
