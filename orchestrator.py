@@ -770,7 +770,7 @@ BindsTo=ibc-{broker}-{short_name}.service
 
 [Service]
 Type=simple
-User=ubuntu
+User=root
 WorkingDirectory=/opt/ibc/execution
 Environment=EXECUTOR_LOG_PATH=/opt/ibc/execution/executor-{broker}-{short_name}.log
 Environment=EXECUTOR_STATE_PATH=/opt/ibc/execution/state-{broker}-{short_name}.json
@@ -856,14 +856,14 @@ BindsTo=ibkr-orchestrator.service
 
 [Service]
 Type=simple
-User=ubuntu
+User=root
 WorkingDirectory=/opt/ibc
 Environment=DISPLAY={args.display}
 Environment=IBC_INI={paths["config_ini"]}
 Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
-ExecStart=/opt/ibc/gatewaystart.sh -inline
+ExecStart=/bin/bash -c '/opt/ibc/restart.sh; /opt/ibc/gatewaystart.sh -inline'
 ExecStop={GATEWAY_STOP}
 Restart=always
 RestartSec=10

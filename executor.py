@@ -575,32 +575,37 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     # )
     risk_ok = (take_profit is not None and stop_loss is not None)
 
-    
-    # Exits
-    if "exit" in a and "long" in a:
-        return Signal(
-            symbol=symbol,
-            exchange=exchange,
-            desired_direction=0,
-            desired_qty=0,
-            raw_alert=alert,
-            take_profit=take_profit,
-            stop_loss=stop_loss,
-            target_percentage=target_pct,
-            signal_timestamp=signal_ts  # ⭐ ADD HERE
-        )
 
-    if "exit" in a and "short" in a:
+        
+    
+    # EXIT LONG ONLY
+    if "exit long" in a:
         return Signal(
             symbol=symbol,
             exchange=exchange,
-            desired_direction=0,
+            desired_direction=None,   # change
             desired_qty=0,
             raw_alert=alert,
             take_profit=take_profit,
             stop_loss=stop_loss,
             target_percentage=target_pct,
-            signal_timestamp=signal_ts  # ⭐ ADD HERE
+            signal_timestamp=signal_ts,
+            risk_valid=None,
+        )
+    
+    # EXIT SHORT ONLY
+    if "exit short" in a or "exit sell" in a:
+        return Signal(
+            symbol=symbol,
+            exchange=exchange,
+            desired_direction=None,   # change
+            desired_qty=0,
+            raw_alert=alert,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
+            target_percentage=target_pct,
+            signal_timestamp=signal_ts,
+            risk_valid=None,
         )
 
     # Long entries
@@ -1307,7 +1312,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
 
         qty = current_position_qty(IB_INSTANCE,contract)
-        logger.info(f"two")
+        #logger.info(f"two")
         log_step( "#############STATE CHECK######################")
         if qty != 0:
             side = "BUY" if qty > 0 else "SELL"
@@ -1412,6 +1417,61 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             #IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
+        
+        # ----------------------------------------------------------
+        # EXIT LONG ONLY
+        # ----------------------------------------------------------
+        if getattr(sig, "raw_alert", "").lower().strip().startswith("exit long"):
+            log_step("[EXEC] Exit Long signal received")
+            
+            if qty > 0:   # only close long positions
+                cancel_all_open_orders(IB_INSTANCE, reason="exit_long", contract=contract)
+                close_position(IB_INSTANCE, contract, qty)
+                if not wait_until_flat(IB_INSTANCE, contract, settings):
+                    log_step( "Exit close not reflected — retrying")
+                    #close_position(contract, qty)
+                    #time.sleep(1)
+
+                    result.update({"ok": False, "action": "exit_failed_after_retry"})
+                    #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                    #IB_INSTANCE.disconnect()
+                    flush_account_log("WEBHOOK_EXEC")
+                    return result
+                result.update({"ok": True, "action": "exit_long_closed"})
+                flush_account_log("WEBHOOK_EXEC")
+                return result
+            else:
+                result.update({"ok": True, "action": "exit_long_no_long_position"})
+                flush_account_log("WEBHOOK_EXEC")
+                return result
+
+        # ----------------------------------------------------------
+        # EXIT SHORT ONLY
+        # ----------------------------------------------------------
+        if getattr(sig, "raw_alert", "").lower().strip().startswith("exit short") or \
+           getattr(sig, "raw_alert", "").lower().strip().startswith("exit sell"):
+            log_step("[EXEC] Exit Short signal received")
+            
+            if qty < 0:   # only close short positions
+                cancel_all_open_orders(IB_INSTANCE, reason="exit_short", contract=contract)
+                close_position(IB_INSTANCE, contract, qty)
+                if not wait_until_flat(IB_INSTANCE, contract, settings):
+                    log_step( "Exit close not reflected — retrying")
+                    #close_position(contract, qty)
+                    #time.sleep(1)
+
+                    result.update({"ok": False, "action": "exit_failed_after_retry"})
+                    #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                    #IB_INSTANCE.disconnect()
+                    flush_account_log("WEBHOOK_EXEC")
+                    return result
+                result.update({"ok": True, "action": "exit_short_closed"})
+                flush_account_log("WEBHOOK_EXEC")
+                return result
+            else:
+                result.update({"ok": True, "action": "exit_short_no_short_position"})
+                flush_account_log("WEBHOOK_EXEC")
+                return result
 
         # ----------------------------------------------------------
         # SAME DIRECTION → NO-OP
