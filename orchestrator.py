@@ -776,7 +776,7 @@ Environment=EXECUTOR_LOG_PATH=/opt/ibc/execution/executor-{broker}-{short_name}.
 Environment=EXECUTOR_STATE_PATH=/opt/ibc/execution/state-{broker}-{short_name}.json
 Environment=DERIVED_ID={derived_id}
 Environment=ACCOUNT_SHORT_NAME={short_name}
-Environment=EXECUTOR_PORT={executor_port}
+Environment={executor_port}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash /opt/ibc/execution/run_ex.sh
 Restart=always
@@ -840,6 +840,11 @@ def ensure_gateway_service(args, broker: str, short_name: str, secret: dict) -> 
     # Make sure logs/settings dirs exist
     os.makedirs(paths["logs_dir"], exist_ok=True)
     os.makedirs(paths["tws_settings"], exist_ok=True)
+    try:
+        subprocess.run(["chown", "-R", "ubuntu:ubuntu", paths["base_dir"]], check=False)
+        subprocess.run(["chmod", "-R", "755", paths["base_dir"]], check=False)
+    except Exception:
+        logger.exception("Failed fixing permissions for %s", paths["base_dir"])
 
     # Systemd unit content: child of ibkr-orchestrator.service
     content = f"""[Unit]
