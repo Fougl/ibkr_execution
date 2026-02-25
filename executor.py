@@ -708,7 +708,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
 
     # More robust wait loop: IB updates positions asynchronously
     for i in range(15):      # ~15 seconds worst-case
-        IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
+        #IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
         #IB_INSTANCE.sleep(0.2)
 
         # Force refresh from IB — important!
