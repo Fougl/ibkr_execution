@@ -496,85 +496,6 @@ def apply_account_added(args, secret_name: str) -> None:
     ensure_executor_service(broker, short_name)
     
 
-
-
-def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
-    entry = old_state.get(secret_name)
-    if not entry:
-        logger.warning(
-            "Secret changed: %s but no local state found – nothing to change",
-            secret_name,
-        )
-        return
-
-    # Extract short_name from secret name
-    short_name = short_name_from_secret_name(secret_name)
-    broker = broker_from_secret_name(secret_name)
-
-    secret = load_secret(args.region, secret_name)
-
-    ok, reason = validate_secret_json(secret_name, secret)
-    if not ok:
-        logger.error(
-            "Invalid secret JSON; skipping restart: %s reason=%s",
-            secret_name,
-            reason,
-        )
-        return
-
-    if str(secret["active"]) != "1":
-        logger.info(
-            "Secret %s inactive (active=0), stopping gateway, this will take 5 minutes",
-            secret_name,
-        )
-
-        # BEFORE stopping gateway → ask executor to flatten all positions
-        flatten_account_positions(args.executor_flatten_url, short_name)
-        stop_and_remove_executor_service(broker, short_name)
-
-
-        derived_id = derive_id_from_name(short_name)
-        command_port = 7462 + derived_id
-
-        env = os.environ.copy()
-        env["COMMAND_SERVER_PORT"] = str(command_port)
-        time.sleep(300)
-        subprocess.run(
-            [GATEWAY_STOP],
-            env=env,
-            check=False,
-        )
-        return
-
-    # Build paths using short_name (NOT account_number)
-    paths = build_account_paths(args.accounts_base, short_name)
-    os.makedirs(paths["base_dir"], exist_ok=True)
-
-    # Rewrite config.ini
-    cfg = render_config_ini(secret, short_name)
-    with open(paths["config_ini"], "w", encoding="utf-8") as f:
-        f.write(cfg)
-
-    # Derive deterministic port (NOT from state)
-    derived_id = derive_id_from_name(short_name)
-    command_port = 7462 + derived_id
-
-    logger.warning(
-        "Secret changed: %s -> restarting IBC on port %s (Phase 1)",
-        secret_name,
-        command_port,
-    )
-
-    # Build env AND set COMMAND_SERVER_PORT BEFORE restart
-    env = build_env(args.display, paths)
-    env["COMMAND_SERVER_PORT"] = str(command_port)
-
-    # Restart gateway
-    run_script(GATEWAY_RESTART, env)
-    time.sleep(20)
-    run_script(GATEWAY_START, env)
-    broker = broker_from_secret_name(secret_name)
-    ensure_executor_service(broker, short_name)
     
 def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     entry = old_state.get(secret_name)
@@ -612,7 +533,7 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
         stop_and_remove_executor_service(broker, short_name)
 
         # Allow some time for flatten to complete (same as before)
-        time.sleep(300)
+        #time.sleep(300)
 
         stop_and_remove_gateway_service(broker, short_name)
         return
