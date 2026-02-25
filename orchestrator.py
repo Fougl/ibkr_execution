@@ -743,13 +743,13 @@ def ensure_gateway_service(args, broker: str, short_name: str, secret: dict) -> 
     # Build per-account paths and config.ini
     paths = build_account_paths(args.accounts_base, short_name)
     # FIX: Clean corrupted TWS UI settings on restart
-    # try:
-    #     if os.path.exists(paths["tws_settings"]):
-    #         shutil.rmtree(paths["tws_settings"])
-    #     os.makedirs(paths["tws_settings"], exist_ok=True)
-    #     logger.warning("Reset tws_settings for %s/%s", broker, short_name)
-    # except Exception:
-    #     log_exception("Failed cleaning tws_settings", account=short_name)
+    try:
+        if os.path.exists(paths["tws_settings"]):
+            shutil.rmtree(paths["tws_settings"])
+        os.makedirs(paths["tws_settings"], exist_ok=True)
+        logger.warning("Reset tws_settings for %s/%s", broker, short_name)
+    except Exception:
+        log_exception("Failed cleaning tws_settings", account=short_name)
     os.makedirs(paths["base_dir"], exist_ok=True)
 
     # Always rewrite config.ini based on the latest secret
@@ -791,7 +791,7 @@ Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
-ExecStart=/opt/ibc/gatewaystart.sh -inline
+ExecStart=/opt/ibc/gatewaystart.sh -inline'
 ExecStop={GATEWAY_STOP}
 Restart=always
 RestartSec=10
