@@ -698,6 +698,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
     f"conId={getattr(contract,'conId',None)} "
     f"ltm={getattr(contract,'lastTradeDateOrContractMonth',None)!r}"
     )
+    log_step(f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     try:
         order = MarketOrder(action, abs(int(qty)))
         IB_INSTANCE.placeOrder(contract, order)
@@ -708,7 +709,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
     # More robust wait loop: IB updates positions asynchronously
     for i in range(15):      # ~15 seconds worst-case
         IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
-        IB_INSTANCE.sleep(0.2)
+        #IB_INSTANCE.sleep(0.2)
 
         # Force refresh from IB — important!
         IB_INSTANCE.reqPositions()
@@ -884,7 +885,7 @@ def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool
         if qty == 0:
             return True
         #logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
-        IB_INSTANCE.sleep(0.1)
+        #IB_INSTANCE.sleep(0.1)
         #time.sleep(1)
     return False
 
@@ -1392,13 +1393,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
             # Close existing position
             close_position(IB_INSTANCE, contract, qty)
-            time.sleep(1)
+            #time.sleep(1)
 
             # Retry logic
             if not wait_until_flat(IB_INSTANCE, contract, settings):
                 log_step( "Exit close not reflected — retrying")
                 #close_position(contract, qty)
-                time.sleep(1)
+                #time.sleep(1)
 
                 result.update({"ok": False, "action": "exit_failed_after_retry"})
                 #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
@@ -1433,13 +1434,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             log_step( f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(IB_INSTANCE,contract, qty)
             cancel_all_open_orders(IB_INSTANCE,reason="before_reversal_entry",  contract=contract)
-            time.sleep(1)
+            #time.sleep(1)
 
             # Retry close
             if not wait_until_flat(IB_INSTANCE,contract, settings):
                 log_step( "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
                 #close_position(contract, qty)
-                time.sleep(1)
+                #time.sleep(1)
                 result.update({"ok": False, "action": "reversal_close_not_confirmed"})
                 #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
                 #IB_INSTANCE.disconnect()
@@ -1478,7 +1479,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             
             #cancel_all_open_orders(reason="before_reversal_entry", acct=ACCOUNT_SHORT_NAME, contract=contract)
             # Fresh enough → open reversed position
-            time.sleep(max(1, int(settings.delay_sec)))
+            #time.sleep(max(1, int(settings.delay_sec)))
 
             # open_position_with_brackets(IB_INSTANCE,
             #     contract,
