@@ -48,7 +48,7 @@ import threading
 # ----------------------------
 HOME = Path.home()
 DEFAULT_DISPLAY = ":1"
-DEFAULT_XVFB_ARGS = ["Xvfb", DEFAULT_DISPLAY, "-screen", "0", "1024x768x16"]
+DEFAULT_XVFB_ARGS = ["Xvfb", DEFAULT_DISPLAY, "-screen", "0", "1024x768x24"]
 
 DEFAULT_ACCOUNTS_BASE = "/srv/ibkr/accounts"
 DEFAULT_STATE_FILE = os.path.expanduser("~/.ibkr/secrets_state.json")
@@ -1011,7 +1011,7 @@ def main() -> None:
         )
         sys.exit(2)
 
-    xvfb_args = ["Xvfb", args.display, "-screen", "0", "1024x768x16"]
+    xvfb_args = ["Xvfb", args.display, "-screen", "0", "1024x768x24"]
 
     # Fail-fast baseline
     try:
