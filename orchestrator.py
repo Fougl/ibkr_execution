@@ -861,6 +861,7 @@ WorkingDirectory=/opt/ibc
 Environment=DISPLAY={args.display}
 Environment=IBC_INI={paths["config_ini"]}
 Environment=LOG_PATH={paths["logs_dir"]}
+Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
 ExecStart=/bin/bash -c '/opt/ibc/restart.sh; /opt/ibc/gatewaystart.sh -inline'
