@@ -776,7 +776,7 @@ Environment=EXECUTOR_LOG_PATH=/opt/ibc/execution/executor-{broker}-{short_name}.
 Environment=EXECUTOR_STATE_PATH=/opt/ibc/execution/state-{broker}-{short_name}.json
 Environment=DERIVED_ID={derived_id}
 Environment=ACCOUNT_SHORT_NAME={short_name}
-Environment={executor_port}
+Environment=EXECUTOR_PORT={executor_port}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash /opt/ibc/execution/run_ex.sh
 Restart=always
