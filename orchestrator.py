@@ -786,7 +786,6 @@ Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
-ExecStartPre=/bin/sh -c "/usr/bin/Xvfb :{derived_id} -screen 0 1024x768x24 >/opt/ibc/xvfb-{derived_id}.log 2>&1 &"
 ExecStart=/opt/ibc/gatewaystart.sh -inline
 ExecStop={GATEWAY_STOP}
 Restart=always
@@ -1016,11 +1015,11 @@ def main() -> None:
     xvfb_args = ["Xvfb", args.display, "-screen", "0", "1024x768x24"]
 
     # Fail-fast baseline
-    # try:
-    #     ensure_xvfb(args.display, xvfb_args)
-    # except Exception:
-    #     log_exception("Failed to ensure Xvfb baseline")
-    #     sys.exit(2)
+    try:
+        ensure_xvfb(args.display, xvfb_args)
+    except Exception:
+        log_exception("Failed to ensure Xvfb baseline")
+        sys.exit(2)
 
     logger.info("Orchestrator running region=%s filter=%r interval=%ss", args.region, args.filter, args.interval)
     # logger.warning("Cold start detected → force start/restart all gateways")
@@ -1031,7 +1030,7 @@ def main() -> None:
 
         try:
             # Self-heal Xvfb each cycle
-            #ensure_xvfb(args.display, xvfb_args)
+            ensure_xvfb(args.display, xvfb_args)
             if os.path.exists(args.state_file):
                 old_state = read_json_file(args.state_file).get("secrets", {})
             else:
