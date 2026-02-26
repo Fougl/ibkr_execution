@@ -754,9 +754,32 @@ def ensure_gateway_service(args, broker: str, short_name: str, secret: dict) -> 
     # Deterministic command server port
     derived_id = derive_id_from_name(short_name)
     command_port = 7462 + derived_id
+    display = f":{derived_id}"
 
     unit_name = f"ibc-{broker}-{short_name}.service"
     unit_path = f"/etc/systemd/system/{unit_name}"
+
+    # Create Xvfb unit
+    xvfb_unit_name = f"xvfb-{derived_id}.service"
+    xvfb_unit_path = f"/etc/systemd/system/{xvfb_unit_name}"
+
+    xvfb_content = f"""[Unit]
+Description=Xvfb for IBKR display {display}
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/Xvfb {display} -screen 0 1024x768x24
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+    with open(xvfb_unit_path, "w", encoding="utf-8") as f:
+        f.write(xvfb_content)
 
     # Make sure logs/settings dirs exist
     os.makedirs(paths["logs_dir"], exist_ok=True)
@@ -770,8 +793,8 @@ def ensure_gateway_service(args, broker: str, short_name: str, secret: dict) -> 
     # Systemd unit content: child of ibkr-orchestrator.service
     content = f"""[Unit]
 Description=IBKR Gateway for {broker}/{short_name}
-After=network-online.target
-Wants=network-online.target
+After=network-online.target {xvfb_unit_name}
+Requires={xvfb_unit_name}
 PartOf=ibkr-orchestrator.service
 BindsTo=ibkr-orchestrator.service
 
@@ -779,14 +802,13 @@ BindsTo=ibkr-orchestrator.service
 Type=simple
 User=root
 WorkingDirectory=/opt/ibc
-Environment=DISPLAY={derived_id}
+Environment=DISPLAY={display}
 Environment=IBC_INI={paths["config_ini"]}
 Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
-ExecStartPre=/bin/sh -c "/usr/bin/Xvfb :{derived_id} -screen 0 1024x768x24 -noreset >/opt/ibc/xvfb-{derived_id}.log 2>&1 &"
-ExecStart=/opt/ibc/gatewaystart.sh -inline
+ExecStart=/bin/bash -c '/opt/ibc/restart.sh; /opt/ibc/gatewaystart.sh -inline'
 ExecStop={GATEWAY_STOP}
 Restart=always
 RestartSec=10
@@ -802,8 +824,13 @@ WantedBy=multi-user.target
 
     # Reload systemd and (re)start the service
     subprocess.run(["systemctl", "daemon-reload"], check=False)
+
+    # Enable/start Xvfb
+    subprocess.run(["systemctl", "enable", xvfb_unit_name], check=False)
+    subprocess.run(["systemctl", "restart", xvfb_unit_name], check=False)
+
+    # Enable/start gateway
     subprocess.run(["systemctl", "enable", unit_name], check=False)
-    # restart always, so config/env changes are picked up
     subprocess.run(["systemctl", "restart", unit_name], check=False)
 
 
