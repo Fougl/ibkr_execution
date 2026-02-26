@@ -330,6 +330,7 @@ AutoRestartTime={secret.get("2fa_time", "10:00 PM")}
 AcceptIncomingConnectionAction=reject
 CommandServerPort={command_server_port}
 OverrideTwsApiPort={twsapi_port}
+IncludeStackTraceForExceptions=yes
 """
 
 
