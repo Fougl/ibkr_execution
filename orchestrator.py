@@ -786,7 +786,7 @@ Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
-ExecStartPre=/bin/sh -c "/usr/bin/Xvfb :{derived_id} -screen 0 1024x768x24  -noreset >/opt/ibc/xvfb-{derived_id}.log 2>&1 &"
+ExecStartPre=/bin/sh -c "/usr/bin/Xvfb :{derived_id} -screen 0 1024x768x24  >/opt/ibc/xvfb-{derived_id}.log 2>&1 &"
 ExecStart=/bin/bash -c '/opt/ibc/restart.sh; /opt/ibc/gatewaystart.sh -inline'
 ExecStop={GATEWAY_STOP}
 Restart=always
