@@ -910,7 +910,9 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
 
     
     if not IB_INSTANCE.isConnected():
+        
         log_step( "[ALARM] Preclose: IB not connected")
+        flush_account_log("PRECLOSE_EXEC")
         return
 
     log_step( "Preclose potential position closing")
@@ -1076,6 +1078,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
         # Ensure persistent global IB connection is alive
     if not IB_INSTANCE or not IB_INSTANCE.isConnected():
         logger.info("[ALARM] Global IB_INSTANCE is not connected")
+        flush_account_log("POSTOPEN_EXEC")
+        return
         #return jsonify({"ok": False, "error": "ib_not_connected"}), 503
 
 
