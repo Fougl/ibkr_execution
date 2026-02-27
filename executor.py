@@ -1611,7 +1611,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                                              ACCOUNT_SHORT_NAME    # <<< NEW
                                              )
 
-            if not op.get("executed", False):
+            if isinstance(op, dict) and not op.get("executed", False):
                 # child says: fill_timeout or some other skip reason
                 result.update({
                     "ok": True,            # important → SQS stops retrying
@@ -1677,7 +1677,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                                              ACCOUNT_SHORT_NAME    # <<< NEW
                                              )
 
-            if not op.get("executed", False):
+            if isinstance(op, dict) and not op.get("executed", False):
                 # child says: fill_timeout or some other skip reason
                 result.update({
                     "ok": True,            # important → SQS stops retrying
