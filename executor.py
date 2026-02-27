@@ -66,9 +66,10 @@ from decimal import Decimal, ROUND_HALF_UP
 # Config (ENV)
 # ---------------------------
 LOG_PATH = os.getenv("EXECUTOR_LOG_PATH", "/opt/ibc/execution/executor.log")
-STATE_PATH = os.getenv("EXECUTOR_STATE_PATH", "/opt/ibc/execution/executor_state.json")
+STATE_PATH = os.getenv("EXECUTOR_STATE_PATH",
+                       "/opt/ibc/execution/executor_state.json")
 DERIVED_ID = int(os.getenv("DERIVED_ID"))
-ACCOUNT_SHORT_NAME= os.getenv("ACCOUNT_SHORT_NAME")
+ACCOUNT_SHORT_NAME = os.getenv("ACCOUNT_SHORT_NAME")
 
 # DynamoDB settings
 # DDB_TABLE = os.getenv("DDB_TABLE", "ankro-global-settings")
@@ -77,11 +78,12 @@ ACCOUNT_SHORT_NAME= os.getenv("ACCOUNT_SHORT_NAME")
 SETTINGS_CACHE_TTL_SEC = int(os.getenv("SETTINGS_CACHE_TTL_SEC", "240"))
 
 
-
 # IBKR connection base rules (match your orchestrator rule)
 IB_HOST = os.getenv("IB_HOST", "127.0.0.1")
-IB_API_PORT_BASE = int(os.getenv("IB_API_PORT_BASE", "4002"))       # port = base + short_name
-IB_CLIENT_ID_BASE = int(os.getenv("IB_CLIENT_ID_BASE", "1000"))     # clientId = base + short_name
+# port = base + short_name
+IB_API_PORT_BASE = int(os.getenv("IB_API_PORT_BASE", "4002"))
+# clientId = base + short_name
+IB_CLIENT_ID_BASE = int(os.getenv("IB_CLIENT_ID_BASE", "1000"))
 
 # Web server
 BIND_HOST = os.getenv("BIND_HOST", "0.0.0.0")
@@ -112,7 +114,6 @@ _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
 
 
-
 # Resolve AWS region ONCE at startup
 try:
     _SESSION = boto3.Session()
@@ -122,8 +123,6 @@ try:
 except Exception as e:
     print(f"FATAL: Could not detect AWS region: {e}")
     raise
-
-
 
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
@@ -159,7 +158,7 @@ def connect_ib_for_webhook():
     ib = IB()
 
     port = 4002 + DERIVED_ID
-    cid  = 1 + DERIVED_ID
+    cid = 1 + DERIVED_ID
 
     try:
         ib.connect(
@@ -185,6 +184,7 @@ def disconnect_ib(ib: IB):
 _account_logs = {}       # { short_name: [str, str, ...] }
 _account_logs_lock = threading.Lock()
 
+
 def log_step(text: str):
     """
     Append a line to that account's log buffer.
@@ -194,7 +194,7 @@ def log_step(text: str):
             _account_logs[ACCOUNT_SHORT_NAME] = []
         _account_logs[ACCOUNT_SHORT_NAME].append(text)
 
-        
+
 def flush_account_log(header: str):
     try:
         lines = _account_logs.get(ACCOUNT_SHORT_NAME, [])
@@ -202,14 +202,15 @@ def flush_account_log(header: str):
             return
 
         msg = (
-            f"[=== {header} acct={ACCOUNT_SHORT_NAME} BEGIN ===]\n"   # HEADER LINE                                     # <-- REQUIRED BLANK LINE
-            + "\n".join(" " + ln for ln in lines)      # BODY INDENTED (so CW hides it)
+            # HEADER LINE                                     # <-- REQUIRED BLANK LINE
+            f"[=== {header} acct={ACCOUNT_SHORT_NAME} BEGIN ===]\n"
+            # BODY INDENTED (so CW hides it)
+            + "\n".join(" " + ln for ln in lines)
         )
         logger.info(msg)
 
     finally:
         _account_logs[ACCOUNT_SHORT_NAME] = []
-
 
 
 # ---------------------------
@@ -219,11 +220,14 @@ def resolved_region() -> str:
     rn = session.region_name
     logger.info(f"[AWS] Resolved region={rn}")
     if not rn:
-        raise RuntimeError("AWS region could not be resolved from environment / metadata")
+        raise RuntimeError(
+            "AWS region could not be resolved from environment / metadata")
     return rn
 # ---------------------------
 # Settings (DynamoDB)
 # ---------------------------
+
+
 @dataclass
 class Settings:
     delay_sec: int = 2
@@ -307,7 +311,7 @@ def load_settings_from_ssm() -> "Settings":
         )
         raw = resp["Parameter"]["Value"]
         data = json.loads(raw)
-        #log_step(0, f"[SSM] Loaded JSON settings: {data}")
+        # log_step(0, f"[SSM] Loaded JSON settings: {data}")
 
     except Exception as e:
         log_step(f"[SSM ERROR] Failed loading /ankro/settings: {e}")
@@ -317,13 +321,13 @@ def load_settings_from_ssm() -> "Settings":
         return data.get(key, default)
 
     return Settings(
-        delay_sec          = int(get("delay_sec", 2)),
-        execution_delay    = int(get("execution_delay", 2)),
-        pre_close_min      = int(get("pre_close_min", 10)),
-        post_open_min      = int(get("post_open_min", 5)),
-        market_open        = str(get("market_open", "09:30")),
-        market_close       = str(get("market_close", "16:00")),
-        timezone           = str(get("timezone", "America/New_York")),
+        delay_sec=int(get("delay_sec", 2)),
+        execution_delay=int(get("execution_delay", 2)),
+        pre_close_min=int(get("pre_close_min", 10)),
+        post_open_min=int(get("post_open_min", 5)),
+        market_open=str(get("market_open", "09:30")),
+        market_close=str(get("market_close", "16:00")),
+        timezone=str(get("timezone", "America/New_York")),
     )
 
 
@@ -383,30 +387,30 @@ def market_datetimes(now_local: datetime, settings: Settings):
     open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
     close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
 
-    #logger.info(f"[DEBUG/MH] Parsed market_open={settings.market_open}, market_close={settings.market_close}")
-    #logger.info(f"[DEBUG/MH] Initial open_dt={open_dt}, close_dt={close_dt}")
+    # logger.info(f"[DEBUG/MH] Parsed market_open={settings.market_open}, market_close={settings.market_close}")
+    # logger.info(f"[DEBUG/MH] Initial open_dt={open_dt}, close_dt={close_dt}")
 
     # ============================================================
     # OVERNIGHT SESSION FIX (CORRECT, SINGLE BLOCK)
     # ============================================================
     if close_dt <= open_dt:
-        #logger.info("[DEBUG/MH] Overnight session detected")
+        # logger.info("[DEBUG/MH] Overnight session detected")
 
         if now_local < open_dt:
             # After midnight but before today's open → session started yesterday
-            #logger.info("[DEBUG/MH] now_local < open_dt → shifting open_dt to previous day")
+            # logger.info("[DEBUG/MH] now_local < open_dt → shifting open_dt to previous day")
             open_dt = open_dt - timedelta(days=1)
             # DO NOT shift close_dt here
         else:
             # After today's open → close_dt belongs to the next day
             close_dt_next = close_dt + timedelta(days=1)
-            #logger.info(f"[DEBUG/MH] now_local >= open_dt → shifting close_dt to next day: {close_dt_next}")
+            # logger.info(f"[DEBUG/MH] now_local >= open_dt → shifting close_dt to next day: {close_dt_next}")
             close_dt = close_dt_next
     # else:
     #     logger.info("[DEBUG/MH] Normal daytime session (no overnight shift).")
 
     preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
-    reopen_dt   = open_dt + timedelta(minutes=settings.post_open_min)
+    reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
 
     # FINAL LOGGING
     # logger.info(
@@ -419,19 +423,41 @@ def market_datetimes(now_local: datetime, settings: Settings):
     return open_dt, close_dt, preclose_dt, reopen_dt
 
 
-
-
-
 def in_trading_window(now_local: datetime, settings: Settings) -> bool:
-    open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
+    """
+    Trading window:
 
-    # DEBUG LOGGING
+      trading_open  = market_open + post_open_min
+      trading_close = market_close - pre_close_min
+
+    Both values come from the SSM /ankro/settings JSON.
+    Overnight sessions still handled by market_datetimes().
+    """
+    # market_datetimes currently returns:
+    #   open_dt  = raw market_open (with overnight handling)
+    #   close_dt = raw market_close (with overnight handling)
+    #   preclose_dt = close_dt - pre_close_min
+    #   reopen_dt   = open_dt  + post_open_min
+    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+        now_local, settings)
+
+    # Effective trading window
+    trading_open = reopen_dt         # market_open + post_open_min
+    trading_close = preclose_dt      # market_close - pre_close_min
+
     logger.info(f"[TIMECHK] now_local={now_local.isoformat()}")
-    logger.info(f"[TIMECHK] open_dt={open_dt.isoformat()}")
-    logger.info(f"[TIMECHK] close_dt={close_dt.isoformat()}")
-    logger.info(f"[TIMECHK] RESULT={open_dt <= now_local <= close_dt}")
+    logger.info(
+        f"[TIMECHK] trading_open={trading_open.isoformat()} "
+        f"(market_open+post_open_min)"
+    )
+    logger.info(
+        f"[TIMECHK] trading_close={trading_close.isoformat()} "
+        f"(market_close-pre_close_min)"
+    )
 
-    return open_dt <= now_local <= close_dt
+    ok = trading_open <= now_local <= trading_close
+    logger.info(f"[TIMECHK] RESULT={ok}")
+    return ok
 
 
 def within_preclose_window(now_local: datetime, settings: Settings) -> bool:
@@ -505,22 +531,20 @@ class Signal:
     stop_loss: float | None = None
     target_percentage: float | None = None
     signal_timestamp: float | None = None
-    risk_valid: bool | None = None 
+    risk_valid: bool | None = None
 
 
-    
 def parse_signal(payload: Dict[str, Any]) -> Signal:
     import re
     alert = str(payload.get("alert", "")).strip()
     symbol_raw = str(payload.get("symbol", "")).strip()
     symbol_raw = symbol_raw.rstrip("!")
-    
-    
+
     if not symbol_raw:
         raise ValueError("Missing 'symbol' in payload")
     if not alert:
         raise ValueError("Missing 'alert' in payload")
-        
+
     m = re.match(r"^([A-Z]+)([FGHJKMNQUVXZ])(\d{4})$", symbol_raw)
     if m:
         root = m.group(1)            # MES
@@ -531,13 +555,13 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         # fallback: use raw
         symbol = symbol_raw
     exchange_raw = str(payload.get("exchange", "")).strip()
-    logger.info(f"[DBG_PARSE] RAW symbol={symbol_raw!r} RAW exchange={exchange_raw!r}")
+    logger.info(
+        f"[DBG_PARSE] RAW symbol={symbol_raw!r} RAW exchange={exchange_raw!r}")
     exchange = exchange_raw.split("_")[0]
-    logger.info(f"[DBG_PARSE] Normalized symbol={symbol!r} exchange={exchange!r}")
-
+    logger.info(
+        f"[DBG_PARSE] Normalized symbol={symbol!r} exchange={exchange!r}")
 
     a = alert.lower()
-    
 
     # NEW: read signal timestamp from JSON
     signal_ts = payload.get("signalTimestamp")
@@ -548,12 +572,13 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         signal_ts = None
 
     # Accept qty aliases: qty / quantity / size
-    qty = payload.get("qty", payload.get("quantity", payload.get("size", DEFAULT_QTY)))
+    qty = payload.get("qty", payload.get(
+        "quantity", payload.get("size", DEFAULT_QTY)))
     try:
         qty_i = int(qty)
     except Exception:
         qty_i = DEFAULT_QTY
-    
+
     def _to_float(v: Any) -> float | None:
         if v is None:
             return None
@@ -575,9 +600,6 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
     # )
     risk_ok = (take_profit is not None and stop_loss is not None)
 
-
-        
-    
     # EXIT LONG ONLY
     if "exit long" in a:
         return Signal(
@@ -592,7 +614,7 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
             signal_timestamp=signal_ts,
             risk_valid=None,
         )
-    
+
     # EXIT SHORT ONLY
     if "exit short" in a or "exit sell" in a:
         return Signal(
@@ -635,15 +657,14 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
             stop_loss=stop_loss,
             target_percentage=target_pct,
             signal_timestamp=signal_ts,
-            risk_valid=risk_ok# ⭐ ADD HERE
+            risk_valid=risk_ok  # ⭐ ADD HERE
         )
 
     raise ValueError(f"Unrecognized alert format: '{alert}'")
 
 
-
-def cancel_all_open_orders(IB_INSTANCE,reason="", symbol=None, contract=None):
-    log_step( f"CANCEL_OPEN_ORDERS reason={reason}")
+def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
+    log_step(f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
         trades = IB_INSTANCE.openTrades()
@@ -651,7 +672,7 @@ def cancel_all_open_orders(IB_INSTANCE,reason="", symbol=None, contract=None):
         trades = []
 
     if not trades:
-        log_step( "CANCEL_OPEN_ORDERS: NONE")
+        log_step("CANCEL_OPEN_ORDERS: NONE")
         return
 
     for t in trades:
@@ -671,62 +692,65 @@ def cancel_all_open_orders(IB_INSTANCE,reason="", symbol=None, contract=None):
         except:
             continue
 
-    log_step( "CANCEL_OPEN_ORDERS: DONE")
-
-
+    log_step("CANCEL_OPEN_ORDERS: DONE")
 
 
 def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
     qty = 0
-    for p in IB_INSTANCE.positions():
-        try:
-            if getattr(p.contract, "conId", None) and getattr(contract, "conId", None):
-                if p.contract.conId == contract.conId:
-                    qty += int(p.position)
-            # else:
-            #     if p.contract.symbol == getattr(contract, "symbol", None) and p.contract.secType == contract.secType:
-            #         qty += int(p.position)
-        except Exception:
-            continue
+    try:
+        for p in IB_INSTANCE.positions():
+            try:
+                if getattr(p.contract, "conId", None) and getattr(contract, "conId", None):
+                    if p.contract.conId == contract.conId:
+                        qty += int(p.position)
+                # else:
+                #     if p.contract.symbol == getattr(contract, "symbol", None) and p.contract.secType == contract.secType:
+                #         qty += int(p.position)
+            except Exception:
+                log_step("[ALARM] Error fetching open position.")
+                continue
+    except:
+        log_step("[ALARM] Error fetching open positions.")
+
     return qty
 
 
 def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
     action = "SELL" if qty > 0 else "BUY"
-    log_step( f"CLOSE_POSITION: sending {action} {abs(qty)}")
+    log_step(f"CLOSE_POSITION: sending {action} {abs(qty)}")
     log_step(
-    f"[CLOSE_DEBUG] Contract before placeOrder: "
-    f"secType={getattr(contract,'secType',None)} "
-    f"symbol={getattr(contract,'symbol',None)} "
-    f"localSymbol={getattr(contract,'localSymbol',None)} "
-    f"exchange={getattr(contract,'exchange',None)!r} "
-    f"conId={getattr(contract,'conId',None)} "
-    f"ltm={getattr(contract,'lastTradeDateOrContractMonth',None)!r}"
+        f"[CLOSE_DEBUG] Contract before placeOrder: "
+        f"secType={getattr(contract,'secType',None)} "
+        f"symbol={getattr(contract,'symbol',None)} "
+        f"localSymbol={getattr(contract,'localSymbol',None)} "
+        f"exchange={getattr(contract,'exchange',None)!r} "
+        f"conId={getattr(contract,'conId',None)} "
+        f"ltm={getattr(contract,'lastTradeDateOrContractMonth',None)!r}"
     )
-    log_step(f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+    log_step(
+        f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     try:
         order = MarketOrder(action, abs(int(qty)))
         IB_INSTANCE.placeOrder(contract, order)
     except Exception as e:
-        log_step( f"CLOSE_POSITION_FAIL: error={e}")
+        log_step(f"CLOSE_POSITION_FAIL: error={e}")
         return
 
     # More robust wait loop: IB updates positions asynchronously
     for i in range(15):      # ~15 seconds worst-case
-        #IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
-        #IB_INSTANCE.sleep(0.2)
+        # IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
+        # IB_INSTANCE.sleep(0.2)
 
         # Force refresh from IB — important!
         IB_INSTANCE.reqPositions()
         IB_INSTANCE.waitOnUpdate(timeout=0.5)
 
-        remaining = current_position_qty(IB_INSTANCE,contract)
+        remaining = current_position_qty(IB_INSTANCE, contract)
         if remaining == 0:
-            log_step( f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
+            log_step(f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
             return
 
-    log_step( f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
-
+    log_step(f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
 
 
 def _round_to_tick(price: float, tick: float) -> float:
@@ -747,7 +771,8 @@ def _round_to_tick(price: float, tick: float) -> float:
     decimals = max(0, -t.as_tuple().exponent)
     return float(out.quantize(Decimal("1") if decimals == 0 else Decimal("1").scaleb(-decimals)))
 
-def get_min_tick(IB_INSTANCE,contract: Contract) -> float:
+
+def get_min_tick(IB_INSTANCE, contract: Contract) -> float:
     """
     Get ContractDetails.minTick for this contract, cached.
     Requires contract to be qualified (conId known) or at least localSymbol stable.
@@ -774,28 +799,28 @@ def get_min_tick(IB_INSTANCE,contract: Contract) -> float:
             raise RuntimeError("reqContractDetails returned empty")
         mt = float(details[0].minTick)
     except Exception as e:
-        log_step( f"[ALARM] MIN_TICK_FAIL: using fallback 0.01 err={e}")
+        log_step(f"[ALARM] MIN_TICK_FAIL: using fallback 0.01 err={e}")
         mt = 0.01  # fallback so we don't crash; futures will still likely reject if wrong
 
     with _MIN_TICK_LOCK:
         _MIN_TICK_CACHE[key] = mt
 
-    log_step( f"MIN_TICK: {mt}")
+    log_step(f"MIN_TICK: {mt}")
     return mt
 
-    
+
 def open_position_with_brackets(IB_INSTANCE,
-    contract: Contract,
-    direction: int,
-    qty: int,
-    take_profit: float | None,
-    stop_loss: float | None,
-    target_percentage: float | None,
-    tp_sl_are_multipliers: bool = True
-) -> None:
+                                contract: Contract,
+                                direction: int,
+                                qty: int,
+                                take_profit: float | None,
+                                stop_loss: float | None,
+                                target_percentage: float | None,
+                                tp_sl_are_multipliers: bool = True
+                                ) -> None:
 
     if take_profit is None or stop_loss is None:
-        log_step( "OPEN_ENTRY_SKIPPED: TP or SL missing")
+        log_step("[ALARM] OPEN_ENTRY_SKIPPED: TP or SL missing")
         return
 
     action = "BUY" if direction > 0 else "SELL"
@@ -807,7 +832,7 @@ def open_position_with_brackets(IB_INSTANCE,
     parent = MarketOrder(action, abs(int(qty)))
     trade = IB_INSTANCE.placeOrder(contract, parent)
 
-    log_step( "PARENT_ORDER_SUBMITTED")
+    log_step("PARENT_ORDER_SUBMITTED")
 
     # ------------------------------------------------
     # 2️⃣ WAIT FOR FILL
@@ -820,17 +845,18 @@ def open_position_with_brackets(IB_INSTANCE,
         if trade.fills:
             fill_price = trade.fills[-1].execution.price
             break
-    log_step(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+    log_step(
+        f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     if not fill_price:
-        log_step( "FILL_FAIL: parent not filled")
+        log_step("[ALARM] FILL_FAIL: parent not filled")
         return {
             "ok": True,                         # <-- critical
             "action": "fill_timeout_no_entry",
             "reason": "market_not_filling",
             "executed": False
         }
-    
-    log_step( f"FILL_PRICE: {fill_price}")
+
+    log_step(f"FILL_PRICE: {fill_price}")
 
     # ------------------------------------------------
     # 3️⃣ CALCULATE TP / SL FROM REAL FILL
@@ -845,13 +871,12 @@ def open_position_with_brackets(IB_INSTANCE,
         tp_price = fill_price * (1 - tp_pct)
         sl_price = fill_price * (1 + sl_pct)
 
-    tick = get_min_tick(IB_INSTANCE,contract)
+    tick = get_min_tick(IB_INSTANCE, contract)
     tp_price = _round_to_tick(tp_price, tick)
     sl_price = _round_to_tick(sl_price, tick)
 
-
-    log_step( f"TP_PRICE: {tp_price}")
-    log_step( f"SL_PRICE: {sl_price}")
+    log_step(f"TP_PRICE: {tp_price}")
+    log_step(f"SL_PRICE: {sl_price}")
 
     # ------------------------------------------------
     # 4️⃣ SEND OCO CHILD ORDERS
@@ -873,15 +898,13 @@ def open_position_with_brackets(IB_INSTANCE,
     IB_INSTANCE.sleep(0.5)
     IB_INSTANCE.waitOnUpdate(timeout=2)
 
-    log_step( "BRACKET_CHILDREN_SUBMITTED")
-    log_step( f"PositionsAfter: {len(IB_INSTANCE.positions())}")
-    log_step( f"TradesAfter:    {len(IB_INSTANCE.openTrades())}")
-
-
-
-
-
-
+    log_step("BRACKET_CHILDREN_SUBMITTED")
+    log_step(f"PositionsAfter: {len(IB_INSTANCE.positions())}")
+    log_step(f"TradesAfter:    {len(IB_INSTANCE.openTrades())}")
+    if len(IB_INSTANCE.positions()) == 0:
+        log_step("[ALARM] No positions were opened")
+    if len(IB_INSTANCE.openTrades()) == 0:
+        log_step("[ALARM] No orders were opened")
 
 
 def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool:
@@ -889,16 +912,16 @@ def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool
         qty = current_position_qty(IB_INSTANCE, contract)
         if qty == 0:
             return True
-        #logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
-        #IB_INSTANCE.sleep(0.1)
-        #time.sleep(1)
+        # logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
+        # IB_INSTANCE.sleep(0.1)
+        # time.sleep(1)
     return False
 
 
 # ---------------------------
 # Pre-close / post-open logic (ONLY runs when webhook arrives)
 # ---------------------------
-def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
+def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
     now_local = now_in_market_tz(settings)
 
     dayk = state_key_for_day(now_local.date())
@@ -908,14 +931,13 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
         st.setdefault("preclose", {})
         st["preclose"].setdefault(dayk, {})
 
-    
-    if not IB_INSTANCE.isConnected():
-        
-        log_step( "[ALARM] Preclose: IB not connected")
-        flush_account_log("PRECLOSE_EXEC")
-        return
+    # if not IB_INSTANCE.isConnected():
 
-    log_step( "Preclose potential position closing")
+    #     log_step( "[ALARM] Preclose: IB not connected")
+    #     flush_account_log("PRECLOSE_EXEC")
+    #     return
+
+    log_step("Preclose potential position closing")
     try:
         with _state_lock:
             st = load_state()
@@ -928,7 +950,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
         # if already:
         #     continue
 
-        #ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
+        # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
         pos = IB_INSTANCE.positions()
 
         # =======================================================
@@ -944,7 +966,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
         orders_snapshot: List[Dict[str, Any]] = []
 
         if not trades:
-            log_step( "No open orders to cancel")
+            log_step("No open orders to cancel")
         else:
             for t in trades:
                 o = t.order
@@ -990,7 +1012,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
         snapshot: Dict[str, Any] = {}
 
         if not pos:
-            log_step( "No open position to close")
+            log_step("No open position to close")
         else:
             for p in pos:
                 if int(p.position) != 0:
@@ -1006,7 +1028,8 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
                         "currency": getattr(c, "currency", ""),
                         "lastTradeDateOrContractMonth": getattr(c, "lastTradeDateOrContractMonth", ""),
                         "position": int(p.position),
-                        "conId": getattr(c, "conId", None),    # <-- THIS IS THE FIX
+                        # <-- THIS IS THE FIX
+                        "conId": getattr(c, "conId", None),
                     }
 
             # =======================================================
@@ -1016,7 +1039,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
                 q = int(p.position)
                 if q == 0:
                     continue
-                
+
                 pc = p.contract
                 cid = getattr(pc, "conId", None)
 
@@ -1036,9 +1059,9 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
                     f"Preclose: acct={ACCOUNT_SHORT_NAME} closing {c.secType} {c.symbol} conId={cid} exch={getattr(c,'exchange',None)} qty={q}"
                 )
 
-                close_position(IB_INSTANCE,c, q)
+                close_position(IB_INSTANCE, c, q)
 
-        #IB_INSTANCE.disconnect()
+        # IB_INSTANCE.disconnect()
 
         # =======================================================
         # SAVE PRE-CLOSE STATE
@@ -1057,67 +1080,70 @@ def ensure_preclose_close_if_needed(IB_INSTANCE,settings: Settings) -> None:
             }
             save_state(st)
 
-        log_step( f"Preclose: acct={ACCOUNT_SHORT_NAME} completed snapshot_count={len(snapshot)}")
+        log_step(
+            f"Preclose: acct={ACCOUNT_SHORT_NAME} completed snapshot_count={len(snapshot)}")
 
     except Exception as e:
-        log_step( f"Preclose error acct={ACCOUNT_SHORT_NAME}: {e}")
+        log_step(f"[ALARM] Preclose error acct={ACCOUNT_SHORT_NAME}: {e}")
 
     finally:
         flush_account_log("PRECLOSE_EXEC")
 
 
-        
-
-
 def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
-    
+
     now_local = now_in_market_tz(settings)
 
     dayk = state_key_for_day(now_local.date())
 
-        # Ensure persistent global IB connection is alive
-    if not IB_INSTANCE or not IB_INSTANCE.isConnected():
-        logger.info("[ALARM] Global IB_INSTANCE is not connected")
-        flush_account_log("POSTOPEN_EXEC")
-        return
-        #return jsonify({"ok": False, "error": "ib_not_connected"}), 503
+    # Ensure persistent global IB connection is alive
+    # if not IB_INSTANCE or not IB_INSTANCE.isConnected():
+    #     logger.info("[ALARM] Global IB_INSTANCE is not connected")
+    #     flush_account_log("POSTOPEN_EXEC")
+    #     return
+    # return jsonify({"ok": False, "error": "ib_not_connected"}), 503
 
-
-    log_step( "Postopen potential position reopen")
+    log_step("Postopen potential position reopen")
     try:
         with _state_lock:
             st = load_state()
-            entry = st.get("preclose", {}).get(dayk, {}).get(str(ACCOUNT_SHORT_NAME))
+            entry = st.get("preclose", {}).get(
+                dayk, {}).get(str(ACCOUNT_SHORT_NAME))
 
         # must have preclose + not already reopened
         if not entry:
-            log_step( "Nothing to reopen")
+            log_step("Nothing to reopen")
             return
         if entry.get("reopen_done") or entry.get("done"):
-            log_step( "Postopen was already triggered")
+            log_step("Postopen was already triggered")
             return
 
         snapshot: Dict[str, Any] = entry.get("snapshot", {}) or {}
-        orders_snapshot: List[Dict[str, Any]] = entry.get("orders_snapshot", []) or []
+        orders_snapshot: List[Dict[str, Any]] = entry.get(
+            "orders_snapshot", []) or []
 
-        #ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
+        # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
 
         # must be flat right now
         any_open = any(int(p.position) != 0 for p in IB_INSTANCE.positions())
         if any_open:
-            log_step( f"Postopen: acct={ACCOUNT_SHORT_NAME} not flat; will not reopen.")
-            #IB_INSTANCE.disconnect()
+            log_step(
+                f"[ALARM] Postopen: acct={ACCOUNT_SHORT_NAME} not flat; will not reopen.")
+            # IB_INSTANCE.disconnect()
             return
 
         # no snapshot → mark done
         if not snapshot:
             with _state_lock:
                 st = load_state()
-                st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_done"] = True
-                st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_at"] = now_local.isoformat()
+                st["preclose"][dayk][str(
+                    ACCOUNT_SHORT_NAME)]["reopen_done"] = True
+                st["preclose"][dayk][str(
+                    ACCOUNT_SHORT_NAME)]["reopen_at"] = now_local.isoformat()
                 save_state(st)
-            log_step( f"Postopen: acct={ACCOUNT_SHORT_NAME} nothing to reopen (empty snapshot).")
-            #IB_INSTANCE.disconnect()
+            log_step(
+                f"Postopen: acct={ACCOUNT_SHORT_NAME} nothing to reopen (empty snapshot).")
+            # IB_INSTANCE.disconnect()
             return
 
         # =====================================================
@@ -1129,7 +1155,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             try:
                 conId = int(conId_key)
             except:
-                log_step( f"[POSTOPEN] Invalid conId key={conId_key}, skipping.")
+                log_step(
+                    f"[ALARM][POSTOPEN] Invalid conId key={conId_key}, skipping.")
                 continue
 
             # Build by conId (BEST POSSIBLE METHOD)
@@ -1141,7 +1168,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 if qc:
                     c = qc[0]   # fully qualified contract
             except Exception as e:
-                log_step( f"[POSTOPEN] qualify failed conId={conId}: {e}")
+                log_step(
+                    f"[ALARM][POSTOPEN] qualify failed conId={conId}: {e}")
 
             direction = +1 if int(meta.get("position", 0)) > 0 else -1
             qty = abs(int(meta.get("position", 0)))
@@ -1170,41 +1198,45 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
                 f"tp={tp_price} sl={sl_price}"
             )
+            if qty <= 0 or tp_price is None or sl_price is None:
+                log_step(
+                    f"[ALARM] Missing TP/SL for conId={conId}; skipping reopen.")
+                continue
 
             open_position_with_brackets(IB_INSTANCE,
-                c,
-                direction,
-                qty,
-                take_profit=tp_price,
-                stop_loss=sl_price,
-                target_percentage=None,
-                tp_sl_are_multipliers=False
-            )
+                                        c,
+                                        direction,
+                                        qty,
+                                        take_profit=tp_price,
+                                        stop_loss=sl_price,
+                                        target_percentage=None,
+                                        tp_sl_are_multipliers=False
+                                        )
 
-            #time.sleep(1)
+            # time.sleep(1)
 
-        #IB_INSTANCE.disconnect()
+        # IB_INSTANCE.disconnect()
 
         # Mark reopen done
         with _state_lock:
             st = load_state()
             st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_done"] = True
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_at"] = now_local.isoformat()
+            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)
+                                 ]["reopen_at"] = now_local.isoformat()
             save_state(st)
 
     except Exception as e:
-        #IB_INSTANCE.disconnect()
-        log_step( f"Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
+        # IB_INSTANCE.disconnect()
+        log_step(f"[ALARM] Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
     finally:
         # try:
         #     IB_INSTANCE.disconnect()
         # except:
         #     pass
-    
-        # Give IB time to release clientID to avoid "clientId already in use"
-        #time.sleep(1.2)
-        flush_account_log("POSTOPEN_EXEC")
 
+        # Give IB time to release clientID to avoid "clientId already in use"
+        # time.sleep(1.2)
+        flush_account_log("POSTOPEN_EXEC")
 
 
 def parse_timestamp(value) -> float | None:
@@ -1243,20 +1275,23 @@ def parse_timestamp(value) -> float | None:
 # ---------------------------
 # Per-account signal execution
 # ---------------------------
+
+
 def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> Dict[str, Any]:
-    
-    if not IB_INSTANCE.isConnected():
-        log_step( "IB_NOT_CONNECTED")
-        flush_account_log("WEBHOOK_EXEC")
-    
-        return {
-            "short_name": ACCOUNT_SHORT_NAME,
-            "api_port": 4002+DERIVED_ID,
-            "client_id": 1+DERIVED_ID,
-            "ok": False,
-            "error": "ib_not_connected",
-        }
-    log_step( f"DEBUG acct={ACCOUNT_SHORT_NAME} port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
+
+    # if not IB_INSTANCE.isConnected():
+    #     log_step( "IB_NOT_CONNECTED")
+    #     flush_account_log("WEBHOOK_EXEC")
+
+    #     return {
+    #         "short_name": ACCOUNT_SHORT_NAME,
+    #         "api_port": 4002+DERIVED_ID,
+    #         "client_id": 1+DERIVED_ID,
+    #         "ok": False,
+    #         "error": "ib_not_connected",
+    #     }
+    log_step(
+        f"DEBUG acct={ACCOUNT_SHORT_NAME} port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
 
     log_step(
         f"EXEC_START alert={sig.raw_alert} "
@@ -1269,7 +1304,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         "api_port": 4002+DERIVED_ID,
         "client_id": 1+DERIVED_ID,
     }
-    
+
     # try:
     #     asyncio.get_running_loop()
     # except RuntimeError:
@@ -1278,29 +1313,28 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
     #     asyncio.set_event_loop(loop)
 
     try:
-        
 
         logger.info(f"{IB_INSTANCE.positions()}")
         contract = build_contract(sig)
         logger.info(f"{contract}")
         # Qualify contract and detect ambiguity
         qualified = IB_INSTANCE.qualifyContracts(contract)
-        #qualified = True
-        #logger.info(f"two")
-        #logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
-        
+        # qualified = True
+        # logger.info(f"two")
+        # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
+
         # If 0 or more than 1 contract returned → ambiguous
         if not qualified or len(qualified) != 1:
-            log_step( 
-                f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+            log_step(
+                f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                 f"qualified_count={len(qualified)}"
             )
-            logger.info( 
-                f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
-                f"qualified_count={len(qualified)}"
-            )
-            #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            #IB_INSTANCE.disconnect()
+            # logger.info(
+            #     f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+            #     f"qualified_count={len(qualified)}"
+            # )
+            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+            # IB_INSTANCE.disconnect()
             result.update({
                 "ok": True,
                 "action": "skipped_ambiguous_contract",                # INFO: early return
@@ -1310,26 +1344,26 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             })
             flush_account_log("WEBHOOK_EXEC")
             return result
-        
+
         # Use the resolved contract
         contract = qualified[0]
 
-
-        qty = current_position_qty(IB_INSTANCE,contract)
-        #logger.info(f"two")
-        log_step( "#############STATE CHECK######################")
+        qty = current_position_qty(IB_INSTANCE, contract)
+        # logger.info(f"two")
+        log_step("#############STATE CHECK######################")
         if qty != 0:
             side = "BUY" if qty > 0 else "SELL"
-            log_step( f"Current position for symbol: {side} {abs(qty)}")
+            log_step(f"Current position for symbol: {side} {abs(qty)}")
         else:
-            log_step( "Current position for symbol: No opened positions")
-        
+            log_step("Current position for symbol: No opened positions")
+
         try:
             trades = IB_INSTANCE.openTrades()
-            
+
         except:
+            log_step("[ALARM] Error fetching open trades.")
             trades = []
-        
+
         filtered = []
         for t in trades:
             try:
@@ -1337,15 +1371,15 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                     filtered.append(t)
             except:
                 continue
-        
+
         if filtered:
-            log_step( "Open orders for symbol:")
+            log_step("Open orders for symbol:")
             for t in filtered:
                 try:
                     c = t.contract
                     o = t.order
-                    #os = t.orderState
-        
+                    # os = t.orderState
+
                     log_step(
                         "  " + " ".join([
                             f"type={getattr(o,'orderType',None)}",
@@ -1354,15 +1388,12 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                         ])
                     )
                 except Exception as e:
-                    log_step( f"ERROR printing open order: {e}")
+                    log_step(f"ERROR printing open order: {e}")
                     raise
         else:
-            log_step( "Open orders for symbol: NONE")
-        
-        log_step( "#############END OF STATE CHECK#################")
+            log_step("Open orders for symbol: NONE")
 
-
-
+        log_step("#############END OF STATE CHECK#################")
 
         # ----------------------------------------------------------
         # NEW: latency check (using auto-detected timestamp)
@@ -1374,78 +1405,83 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 sig_age = now_ts - sig.signal_timestamp
             except:
                 sig_age = None
-        #log_step( f"[EXEC] Signal timestamp {sig.signal_timestamp}  {int(settings.execution_delay)}")
+        # log_step( f"[EXEC] Signal timestamp {sig.signal_timestamp}  {int(settings.execution_delay)}")
         allow_entry = False
         allow_entry = True
         if sig.desired_direction != 0 and sig_age is not None:
             if sig_age > int(settings.execution_delay):
-                log_step( f"[EXEC] Entry not executed: the execution is delayed by more than {int(settings.execution_delay)} relative to the signal")
+                log_step(
+                    f"[ALARM][EXEC] Entry not executed: the execution is delayed by more than {int(settings.execution_delay)} relative to the signal")
                 allow_entry = False
-        #logger.info(f"[EXEC] latency_check sig_age={sig_age} execution_delay={int(settings.execution_delay)} allow_entry={allow_entry}")
+        # logger.info(f"[EXEC] latency_check sig_age={sig_age} execution_delay={int(settings.execution_delay)} allow_entry={allow_entry}")
 
         # ----------------------------------------------------------
         # EXIT (ALWAYS perform exit, ignore latency)
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
-            #logger.info(f"[EXEC] Branch=EXIT acct={ACCOUNT_SHORT_NAME} current_qty={qty}")
+            # logger.info(f"[EXEC] Branch=EXIT acct={ACCOUNT_SHORT_NAME} current_qty={qty}")
             cancel_all_open_orders(IB_INSTANCE,
-                reason="exit_signal",
-                contract=contract
-            )
+                                   reason="exit_signal",
+                                   contract=contract
+                                   )
             if qty == 0:
-                log_step( "No positions to exit for the exit signal")
+                log_step("No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
             # Close existing position
             close_position(IB_INSTANCE, contract, qty)
-            #time.sleep(1)
+            # time.sleep(1)
 
             # Retry logic
             if not wait_until_flat(IB_INSTANCE, contract, settings):
-                log_step( "Exit close not reflected — retrying")
-                #close_position(contract, qty)
-                #time.sleep(1)
+                log_step("[ALARM] Exit close not reflected — retrying")
+                # close_position(contract, qty)
+                # time.sleep(1)
 
-                result.update({"ok": False, "action": "exit_failed_after_retry"})
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+                result.update(
+                    {"ok": False, "action": "exit_failed_after_retry"})
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
-            log_step( "Position closed successfully")
+            log_step("Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
-            #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            #IB_INSTANCE.disconnect()
+            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+            # IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
-        
+
         # ----------------------------------------------------------
         # EXIT LONG ONLY
         # ----------------------------------------------------------
         if getattr(sig, "raw_alert", "").lower().strip().startswith("exit long"):
             log_step("[EXEC] Exit Long signal received")
-            
+
             if qty > 0:   # only close long positions
-                cancel_all_open_orders(IB_INSTANCE, reason="exit_long", contract=contract)
+                cancel_all_open_orders(
+                    IB_INSTANCE, reason="exit_long", contract=contract)
                 close_position(IB_INSTANCE, contract, qty)
                 if not wait_until_flat(IB_INSTANCE, contract, settings):
-                    log_step( "Exit close not reflected — retrying")
-                    #close_position(contract, qty)
-                    #time.sleep(1)
+                    log_step("[ALARM] Exit close not reflected — retrying")
+                    # close_position(contract, qty)
+                    # time.sleep(1)
 
-                    result.update({"ok": False, "action": "exit_failed_after_retry"})
-                    #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                    #IB_INSTANCE.disconnect()
+                    result.update(
+                        {"ok": False, "action": "exit_failed_after_retry"})
+                    # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                    # IB_INSTANCE.disconnect()
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 result.update({"ok": True, "action": "exit_long_closed"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
-                result.update({"ok": True, "action": "exit_long_no_long_position"})
+                result.update(
+                    {"ok": True, "action": "exit_long_no_long_position"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -1455,25 +1491,28 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         if getattr(sig, "raw_alert", "").lower().strip().startswith("exit short") or \
            getattr(sig, "raw_alert", "").lower().strip().startswith("exit sell"):
             log_step("[EXEC] Exit Short signal received")
-            
+
             if qty < 0:   # only close short positions
-                cancel_all_open_orders(IB_INSTANCE, reason="exit_short", contract=contract)
+                cancel_all_open_orders(
+                    IB_INSTANCE, reason="exit_short", contract=contract)
                 close_position(IB_INSTANCE, contract, qty)
                 if not wait_until_flat(IB_INSTANCE, contract, settings):
-                    log_step( "Exit close not reflected — retrying")
-                    #close_position(contract, qty)
-                    #time.sleep(1)
+                    log_step("[ALARM] Exit close not reflected — retrying")
+                    # close_position(contract, qty)
+                    # time.sleep(1)
 
-                    result.update({"ok": False, "action": "exit_failed_after_retry"})
-                    #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                    #IB_INSTANCE.disconnect()
+                    result.update(
+                        {"ok": False, "action": "exit_failed_after_retry"})
+                    # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                    # IB_INSTANCE.disconnect()
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 result.update({"ok": True, "action": "exit_short_closed"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
-                result.update({"ok": True, "action": "exit_short_no_short_position"})
+                result.update(
+                    {"ok": True, "action": "exit_short_no_short_position"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -1484,10 +1523,12 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         desired_qty = sig.desired_qty if sig.desired_qty > 0 else DEFAULT_QTY
 
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
-            log_step( "[EXEC] Same direction position already opened. Skipping execution")
-            result.update({"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
-            #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            #IB_INSTANCE.disconnect()
+            log_step(
+                "[EXEC] Same direction position already opened. Skipping execution")
+            result.update(
+                {"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
+            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+            # IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -1495,19 +1536,23 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         # REVERSAL (close ALWAYS, but entry obeys latency)
         # ----------------------------------------------------------
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
-            log_step( f"[EXEC] Opposite direction singal: Closing position and opening new one.")
-            close_position(IB_INSTANCE,contract, qty)
-            cancel_all_open_orders(IB_INSTANCE,reason="before_reversal_entry",  contract=contract)
-            #time.sleep(1)
+            log_step(
+                f"[EXEC] Opposite direction singal: Closing position and opening new one.")
+            close_position(IB_INSTANCE, contract, qty)
+            cancel_all_open_orders(
+                IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
+            # time.sleep(1)
 
             # Retry close
-            if not wait_until_flat(IB_INSTANCE,contract, settings):
-                log_step( "Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
-                #close_position(contract, qty)
-                #time.sleep(1)
-                result.update({"ok": False, "action": "reversal_close_not_confirmed"})
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+            if not wait_until_flat(IB_INSTANCE, contract, settings):
+                log_step(
+                    "[ALARM] Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
+                # close_position(contract, qty)
+                # time.sleep(1)
+                result.update(
+                    {"ok": False, "action": "reversal_close_not_confirmed"})
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -1524,26 +1569,27 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                     "action": "reversal_closed_but_entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
-            
+
             if not sig.risk_valid:
-                log_step( "[EXEC] TP or SL not specified. Skipping execution")
+                log_step(
+                    "[ALARM][EXEC] TP or SL not specified. Skipping execution")
                 result.update({
                     "ok": True,
                     "action": "reversal_closed_but_entry_skipped_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
-            
-            #cancel_all_open_orders(reason="before_reversal_entry", acct=ACCOUNT_SHORT_NAME, contract=contract)
+
+            # cancel_all_open_orders(reason="before_reversal_entry", acct=ACCOUNT_SHORT_NAME, contract=contract)
             # Fresh enough → open reversed position
-            #time.sleep(max(1, int(settings.delay_sec)))
+            # time.sleep(max(1, int(settings.delay_sec)))
 
             # open_position_with_brackets(IB_INSTANCE,
             #     contract,
@@ -1554,16 +1600,16 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             #     sig.target_percentage,
             #     ACCOUNT_SHORT_NAME    # <<< NEW
             # )
-            
-            op=open_position_with_brackets(IB_INSTANCE,
-                contract,
-                desired_dir,
-                desired_qty,
-                sig.take_profit,
-                sig.stop_loss,
-                sig.target_percentage,
-                ACCOUNT_SHORT_NAME    # <<< NEW
-            )
+
+            op = open_position_with_brackets(IB_INSTANCE,
+                                             contract,
+                                             desired_dir,
+                                             desired_qty,
+                                             sig.take_profit,
+                                             sig.stop_loss,
+                                             sig.target_percentage,
+                                             ACCOUNT_SHORT_NAME    # <<< NEW
+                                             )
 
             if not op.get("executed", False):
                 # child says: fill_timeout or some other skip reason
@@ -1575,7 +1621,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 })
                 return result
 
-            #logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
+            # logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
                 "ok": True,
@@ -1583,8 +1629,8 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            #IB_INSTANCE.disconnect()
+            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+            # IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -1593,43 +1639,43 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         # ----------------------------------------------------------
         if qty == 0:
             # Skip stale entries
-            cancel_all_open_orders(IB_INSTANCE,reason="before_new_entry", contract=contract)
+            cancel_all_open_orders(
+                IB_INSTANCE, reason="before_new_entry", contract=contract)
             if not allow_entry:
                 result.update({
                     "ok": True,
                     "action": "entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
-            
+
             if desired_dir != 0 and not sig.risk_valid:
-                log_step( "[EXEC] TP or SL not specified. Skipping execution")
+                log_step("[EXEC] TP or SL not specified. Skipping execution")
                 result.update({
                     "ok": True,
                     "action": "entry_ignored_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #IB_INSTANCE.disconnect()
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
-
             # Fresh entry → open position
-            #time.sleep(max(0, int(settings.execution_delay)))
-            
-            op=open_position_with_brackets(IB_INSTANCE,
-                contract,
-                desired_dir,
-                desired_qty,
-                sig.take_profit,
-                sig.stop_loss,
-                sig.target_percentage,
-                ACCOUNT_SHORT_NAME    # <<< NEW
-            )
+            # time.sleep(max(0, int(settings.execution_delay)))
+
+            op = open_position_with_brackets(IB_INSTANCE,
+                                             contract,
+                                             desired_dir,
+                                             desired_qty,
+                                             sig.take_profit,
+                                             sig.stop_loss,
+                                             sig.target_percentage,
+                                             ACCOUNT_SHORT_NAME    # <<< NEW
+                                             )
 
             if not op.get("executed", False):
                 # child says: fill_timeout or some other skip reason
@@ -1641,7 +1687,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 })
                 return result
 
-            #logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
+            # logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
                 "ok": True,
@@ -1649,37 +1695,40 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            #IB_INSTANCE.disconnect()
+            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+            # IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
 
         # ----------------------------------------------------------
         # Should never reach here
         # ----------------------------------------------------------
-        result.update({"ok": False, "action": "ambiguous_state", "current_qty": qty})
-        #logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-        #IB_INSTANCE.disconnect()
+        result.update(
+            {"ok": False, "action": "ambiguous_state", "current_qty": qty})
+        # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+        # IB_INSTANCE.disconnect()
         flush_account_log("WEBHOOK_EXEC")
         return result
 
     except Exception as e:
-        #logger.info("error: {str(e)}")
+        # logger.info("error: {str(e)}")
+        log_step(f"[ALARM][EXEC] error: {str(e)}")
         result.update({"ok": False, "error": str(e)})
         flush_account_log("WEBHOOK_EXEC")
         return result
     finally:
         flush_account_log("WEBHOOK_EXEC")
 
+
 def background_scheduler_loop():
-    IB_INSTANCE=None
+    IB_INSTANCE = None
     """
     Market-aware scheduler:
       - Runs ensure_preclose_close_if_needed() once per market day
       - Runs ensure_postopen_reopen_if_needed() once per market day
       - Automatically detects new market day by comparing open_dt dates
     """
-    #logger.info("Background scheduler thread started.")
+    # logger.info("Background scheduler thread started.")
 
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
@@ -1689,7 +1738,8 @@ def background_scheduler_loop():
             settings = settings_cache.get()
             now_local = now_in_market_tz(settings)
 
-            open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+            open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+                now_local, settings)
             # logger.info(
             #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
             #     f"open_dt={open_dt.isoformat()} | "
@@ -1709,48 +1759,50 @@ def background_scheduler_loop():
             if last_postopen_run_day != market_day:
                 last_postopen_run_day = None
 
-
-
             # ==========================================
             # PRE-CLOSE WINDOW — run ONCE per market day
             # ==========================================
             if preclose_dt <= now_local:
                 if last_preclose_run_day != market_day:
-                    logger.info("Triggering pre-close ensure for market day %s", market_day)
-                    #accounts = secrets_cache.get_accounts()
-                    #logger.info(f"[HTTP] Accounts found={len(accounts)}")
-                    #if accounts:
-                    if IB_INSTANCE:
-                        ensure_preclose_close_if_needed(IB_INSTANCE,settings)
+                    logger.info(
+                        "Triggering pre-close ensure for market day %s", market_day)
+                    # accounts = secrets_cache.get_accounts()
+                    # logger.info(f"[HTTP] Accounts found={len(accounts)}")
+                    # if accounts:
+                    IB_INSTANCE = connect_ib_for_webhook()
+                    if IB_INSTANCE and IB_INSTANCE.isConnected():
+                        ensure_preclose_close_if_needed(IB_INSTANCE, settings)
                     else:
-                        logger.info("IB not connected")
+                        logger.info(
+                            "[ALARM] Preclose: IB not able to connected")
                     last_preclose_run_day = market_day
 
             # ==========================================
             # POST-OPEN WINDOW — run ONCE per market day
             # ==========================================
-            if reopen_dt <= now_local:
-                if last_postopen_run_day != market_day:
-                    logger.info("Triggering post-open ensure for market day %s", market_day)
-                    #accounts = secrets_cache.get_accounts()
-                    #logger.info(f"[HTTP] Accounts found={len(accounts)}")
-                    #if accounts:
-                    if IB_INSTANCE:
-                        ensure_postopen_reopen_if_needed(IB_INSTANCE,settings)
+            if reopen_dt <= now_local and settings.post_open_min:
+                if last_postopen_run_day and last_postopen_run_day != market_day:
+                    logger.info(
+                        "Triggering post-open ensure for market day %s", market_day)
+                    # accounts = secrets_cache.get_accounts()
+                    # logger.info(f"[HTTP] Accounts found={len(accounts)}")
+                    # if accounts:
+                    IB_INSTANCE = connect_ib_for_webhook()
+                    if IB_INSTANCE and IB_INSTANCE.isConnected():
+                        ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
                     else:
-                        logger.info("IB not connected")
-                    last_postopen_run_day = market_day
+                        logger.info(
+                            "[ALARM] Postopen: IB not able to connected")
+                last_postopen_run_day = market_day
 
         except Exception as e:
             logger.exception(f"Scheduler error: {e}")
 
-        #time.sleep(20)
-        
-
-        
+        time.sleep(20)
 
 
 _scheduler_started_flag = False
+
 
 def start_scheduler():
     global _scheduler_started_flag
@@ -1762,84 +1814,145 @@ def start_scheduler():
 
     t = threading.Thread(target=background_scheduler_loop, daemon=True)
     t.start()
-    #logger.info("Background scheduler thread started.")
+    # logger.info("Background scheduler thread started.")
 
 # START scheduler on module import (works with Waitress)
 
+
 start_scheduler()
-#start_ib_connection()  
+# start_ib_connection()
 # ---------------------------
 # Flask app
 # ---------------------------
 app = Flask(__name__)
 
 
-
 @app.post("/webhook")
 def webhook() -> Any:
-    #global IB_INSTANCE
+    # global IB_INSTANCE
     logger.info("===HTTP /webhook received")
-    ib = connect_ib_for_webhook()
-    IB_INSTANCE=ib
-    if ib is None or not ib.isConnected():
-        logger.info("Cannot process webhook: IB is down")
-        return jsonify({"ok": False, "error": "ib_down"}), 503
+
     try:
         payload = request.get_json(force=True, silent=False) or {}
     except Exception:
         payload = {}
 
     try:
-        logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         settings = settings_cache.get()
-        logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         sig = parse_signal(payload)
-        logger.info(f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
-
-        # Ensure persistent global IB connection is alive
-        if not IB_INSTANCE or not IB_INSTANCE.isConnected():
-            logger.info("[ALARM] Global IB_INSTANCE is not connected")
-            return jsonify({"ok": False, "error": "ib_not_connected"}), 503
-
+        logger.info(
+            f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
         now_local = now_in_market_tz(settings)
+        open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
 
+        # delay of 1 minute after reopen (custom)
+        extra_webhook_delay_min = 1
+        webhook_allowed_dt = reopen_dt + timedelta(minutes=extra_webhook_delay_min)
+        if now_local < webhook_allowed_dt:
+            logger.info(
+                f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
+                f"now={now_local.isoformat()} alert={sig.raw_alert}"
+            )
+            return jsonify({
+                "ok": True,
+                "ignored": True,
+                "reason": "webhook_wait_reopen_delay",
+                "allowed_after": webhook_allowed_dt.isoformat()
+            }), 200
 
         # market hours gating
         if not in_trading_window(now_local, settings):
-            logger.info(f"[HTTP] GATE outside_market_hours now={now_local.isoformat()} open_close={market_datetimes(now_local, settings)[:2]}")
-            logger.info(f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+            logger.info(
+                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open_close={market_datetimes(now_local, settings)[2:]}")
+            logger.info(
+                f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
             return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
 
         if within_preclose_window(now_local, settings):
-            logger.info(f"[HTTP] GATE within_preclose_window now={now_local.isoformat()}")
-            logger.info(f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+            logger.info(
+                f"[CHECK] GATE within_preclose_window now={now_local.isoformat()}")
+            logger.info(
+                f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
             return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
 
-        
+        IB_INSTANCE = connect_ib_for_webhook()
+        if not IB_INSTANCE or not IB_INSTANCE.isConnected():
+            logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
+            return jsonify({"ok": False, "error": "ib_not_connected"}), 503
 
         result = execute_signal_for_account(IB_INSTANCE, sig, settings)
         return jsonify({"ok": result["ok"], "result": result}), 200
 
-
     except Exception as e:
-        logger.exception(f"Webhook handling failed. payload={payload} err={e}")
+        logger.exception(
+            f"[ALARM] Webhook handling failed. payload={payload} err={e}")
         return jsonify({"ok": False, "error": str(e)}), 400
     finally:
-       # 🔥 CRITICAL — disconnect exactly once
-       try:
-           if IB_INSTANCE and IB_INSTANCE.isConnected():
-               IB_INSTANCE.disconnect()
-               logger.info("[IB] Clean disconnect after webhook")
-       except Exception:
-           pass
-       #logger.info("[IB] Clean disconnect after webhook")
-       IB_INSTANCE = None  # cleanup
+        # 🔥 CRITICAL — disconnect exactly once
+        try:
+            if IB_INSTANCE and IB_INSTANCE.isConnected():
+                IB_INSTANCE.disconnect()
+                logger.info("[IB] Clean disconnect after webhook")
+        except Exception:
+            pass
+        # logger.info("[IB] Clean disconnect after webhook")
+        IB_INSTANCE = None  # cleanup
 
+    # except ExecError as e:
+    #     # Expected, domain-level problems
+    #     alarm_log(
+    #         e.code,
+    #         str(e),
+    #         acct=ACCOUNT_SHORT_NAME,
+    #         request_id=request_id,
+    #         payload_summary=str(payload)[:500],
+    #     )
+    #     logger.exception(f"[WEBHOOK_EXEC_ERROR] request_id={request_id}")
+    #     return (
+    #         jsonify({
+    #             "ok": False,
+    #             "error": e.code,
+    #             "message": str(e),
+    #         }),
+    #         e.http_status,
+    #     )
+
+    # except Exception as e:
+    #     # Unexpected bug/edge case
+    #     alarm_log(
+    #         "unexpected_error",
+    #         str(e),
+    #         acct=ACCOUNT_SHORT_NAME,
+    #         request_id=request_id,
+    #     )
+    #     logger.exception(f"[WEBHOOK_UNEXPECTED] request_id={request_id}")
+    #     return (
+    #         jsonify({
+    #             "ok": False,
+    #             "error": "internal_error",
+    #             "message": "Unexpected error in executor",
+    #         }),
+    #         500,
+    #     )
+
+    # finally:
+    #     # 6) Always clean up IB and flush account log ONCE
+    #     try:
+    #         if IB_INSTANCE and IB_INSTANCE.isConnected():
+    #             IB_INSTANCE.disconnect()
+    #             logger.info(f"[IB] request_id={request_id} Clean disconnect after webhook")
+    #     except Exception:
+    #         logger.exception(f"[IB] request_id={request_id} Error during disconnect")
+
+    #     flush_account_log("WEBHOOK_EXEC")
 
 # --------------------------------------------------------------------
+
 
 # When running executor.py directly (not via waitress)
 if __name__ == "__main__":
     logger.info("===STARTING: Executor initialized")
-    ##start_scheduler()
+    # start_scheduler()

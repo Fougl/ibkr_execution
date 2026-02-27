@@ -370,10 +370,8 @@ def reconcile_ibkr_secrets(
     for page in paginator.paginate():
         for s in page.get("SecretList", []):
             name = s.get("Name", "")
-            if not name.startswith("broker/"):
+            if not name.lower().startswith("broker/ibkr/"):
                 continue
-            # if name_filter_substring.lower() not in name.lower():
-            #     continue
 
             resp = sm.get_secret_value(SecretId=name)
             secret = json.loads(resp["SecretString"])
@@ -613,7 +611,7 @@ def force_start_or_restart_all_secrets(args) -> None:
     for page in paginator.paginate():
         for s in page.get("SecretList", []):
             secret_name = s.get("Name", "")
-            if not secret_name.startswith("broker/"):
+            if not secret_name.lower().startswith("broker/ibkr/"):
                 continue
 
             try:
