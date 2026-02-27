@@ -1819,7 +1819,7 @@ def start_scheduler():
 # START scheduler on module import (works with Waitress)
 
 
-start_scheduler()
+# start_scheduler()
 # start_ib_connection()
 # ---------------------------
 # Flask app
@@ -1950,9 +1950,11 @@ def webhook() -> Any:
     #     flush_account_log("WEBHOOK_EXEC")
 
 # --------------------------------------------------------------------
-
-
+def create_app():
+    return app
 # When running executor.py directly (not via waitress)
 if __name__ == "__main__":
     logger.info("===STARTING: Executor initialized")
-    # start_scheduler()
+    start_scheduler()
+    
+
