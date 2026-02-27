@@ -25,7 +25,7 @@ echo ">>> Starting EXECUTOR (scheduler + IBKR logic)"
 nohup /home/ubuntu/venv/bin/python3 /opt/ibc/execution/executor.py > /opt/ibc/execution/executor.log 2>&1 &
 
 echo ">>> Starting WAITRESS (webhook API only)"
-nohup /home/ubuntu/venv/bin/waitress-serve --host=0.0.0.0 --port=${EXECUTOR_PORT} executor:create_app > /opt/ibc/execution/waitress.log 2>&1 &
+nohup /home/ubuntu/venv/bin/waitress-serve --host=0.0.0.0 --port=${EXECUTOR_PORT} --call executor:create_app > /opt/ibc/execution/waitress.log 2>&1 &
 
 sleep 1
 
