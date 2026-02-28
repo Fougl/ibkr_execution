@@ -1734,6 +1734,7 @@ def background_scheduler_loop():
     last_postopen_run_day = None   # date of market_open for the last run
 
     while True:
+        logger.info("Background scheduler thread started.")
         try:
             settings = settings_cache.get()
             now_local = now_in_market_tz(settings)
