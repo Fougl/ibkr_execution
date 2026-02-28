@@ -1797,7 +1797,7 @@ def background_scheduler_loop():
                 last_postopen_run_day = market_day
 
         except Exception as e:
-            logger.exception(f"Scheduler error: {e}")
+            logger.info(f"Scheduler error: {e}")
 
         time.sleep(20)
 
