@@ -1728,7 +1728,7 @@ def background_scheduler_loop():
       - Runs ensure_postopen_reopen_if_needed() once per market day
       - Automatically detects new market day by comparing open_dt dates
     """
-    # logger.info("Background scheduler thread started.")
+    logger.info("Background scheduler thread started.")
 
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
@@ -1951,6 +1951,7 @@ def webhook() -> Any:
 
 # --------------------------------------------------------------------
 def create_app():
+    #start_scheduler()
     return app
 # When running executor.py directly (not via waitress)
 if __name__ == "__main__":
