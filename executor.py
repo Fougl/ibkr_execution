@@ -1951,12 +1951,12 @@ def webhook() -> Any:
     #     flush_account_log("WEBHOOK_EXEC")
 
 # --------------------------------------------------------------------
-# def create_app():
-#     #start_scheduler()
-#     return app
+def create_app():
+    #start_scheduler()
+    return app
 # When running executor.py directly (not via waitress)
-if __name__ == "__main__":
-    logger.info("===STARTING: Executor initialized")
+# if __name__ == "__main__":
+#     logger.info("===STARTING: Executor initialized")
     
     
 
