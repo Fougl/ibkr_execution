@@ -543,6 +543,8 @@ def apply_account_changed(args, secret_name: str, old_state: dict) -> None:
     )
 
     # ensure_gateway_service updates config.ini and restarts systemd unit
+    stop_and_remove_gateway_service(broker, short_name)
+    time.sleep(10)
     ensure_gateway_service(args, broker, short_name, secret)
 
     # Also restart/ensure executor for this account
@@ -806,7 +808,7 @@ Environment=LOG_PATH={paths["logs_dir"]}
 Environment=TWS_PATH=/home/ubuntu/Jts
 Environment=TWS_SETTINGS_PATH={paths["tws_settings"]}
 Environment=COMMAND_SERVER_PORT={command_port}
-ExecStart=/bin/bash -c '/opt/ibc/restart.sh; /opt/ibc/gatewaystart.sh -inline'
+ExecStart=/opt/ibc/gatewaystart.sh -inline
 ExecStop={GATEWAY_STOP}
 Restart=always
 RestartSec=10
