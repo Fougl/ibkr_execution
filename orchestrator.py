@@ -326,7 +326,8 @@ BypassPriceBasedVolatilityRiskWarning=yes
 BypassUSStocksMarketDataInSharesWarning=yes
 BypassRedirectOrderWarning=yes
 BypassNoOverfillProtectionPrecaution=yes
-AutoRestartTime={secret.get("2fa_time", "10:00 PM")}
+AutoRestartTime="10:00 PM"
+ColdRestartTime={secret.get("2fa_time", "10:00 PM")}
 AcceptIncomingConnectionAction=reject
 CommandServerPort={command_server_port}
 OverrideTwsApiPort={twsapi_port}
@@ -684,7 +685,7 @@ def ensure_executor_service(broker: str, short_name: str) -> None:
     # if not os.path.exists(unit_path):
     content = f"""[Unit]
 Description=IBKR Executor for {short_name}
-After=network-online.target
+After=network-online.target ibc-{broker}-{short_name}.service
 Wants=network-online.target
 PartOf=ibc-{broker}-{short_name}.service
 BindsTo=ibc-{broker}-{short_name}.service
@@ -795,6 +796,7 @@ WantedBy=multi-user.target
 Description=IBKR Gateway for {broker}/{short_name}
 After=network-online.target {xvfb_unit_name}
 Requires={xvfb_unit_name}
+Wants=executor-{broker}-{short_name}.service
 PartOf=ibkr-orchestrator.service
 BindsTo=ibkr-orchestrator.service
 
