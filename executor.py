@@ -200,10 +200,10 @@ def flush_account_log(header: str):
         lines = _account_logs.get(ACCOUNT_SHORT_NAME, [])
         if not lines:
             return
-
+        #f"[=== {header} acct={ACCOUNT_SHORT_NAME} BEGIN ===]\n"
         msg = (
             # HEADER LINE                                     # <-- REQUIRED BLANK LINE
-            f"[=== {header} acct={ACCOUNT_SHORT_NAME} BEGIN ===]\n"
+            f"[=== {header}===]\n"
             # BODY INDENTED (so CW hides it)
             + "\n".join(" " + ln for ln in lines)
         )
@@ -445,18 +445,18 @@ def in_trading_window(now_local: datetime, settings: Settings) -> bool:
     trading_open = reopen_dt         # market_open + post_open_min
     trading_close = preclose_dt      # market_close - pre_close_min
 
-    logger.info(f"[TIMECHK] now_local={now_local.isoformat()}")
-    logger.info(
-        f"[TIMECHK] trading_open={trading_open.isoformat()} "
-        f"(market_open+post_open_min)"
-    )
-    logger.info(
-        f"[TIMECHK] trading_close={trading_close.isoformat()} "
-        f"(market_close-pre_close_min)"
-    )
+    # logger.info(f"[TIMECHK] now_local={now_local.isoformat()}")
+    # logger.info(
+    #     f"[TIMECHK] trading_open={trading_open.isoformat()} "
+    #     f"(market_open+post_open_min)"
+    # )
+    # logger.info(
+    #     f"[TIMECHK] trading_close={trading_close.isoformat()} "
+    #     f"(market_close-pre_close_min)"
+    # )
 
     ok = trading_open <= now_local <= trading_close
-    logger.info(f"[TIMECHK] RESULT={ok}")
+    #logger.info(f"[TIMECHK] RESULT={ok}")
     return ok
 
 
@@ -555,11 +555,11 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         # fallback: use raw
         symbol = symbol_raw
     exchange_raw = str(payload.get("exchange", "")).strip()
-    logger.info(
-        f"[DBG_PARSE] RAW symbol={symbol_raw!r} RAW exchange={exchange_raw!r}")
+    # logger.info(
+    #     f"[DBG_PARSE] RAW symbol={symbol_raw!r} RAW exchange={exchange_raw!r}")
     exchange = exchange_raw.split("_")[0]
-    logger.info(
-        f"[DBG_PARSE] Normalized symbol={symbol!r} exchange={exchange!r}")
+    # logger.info(
+    #     f"[DBG_PARSE] Normalized symbol={symbol!r} exchange={exchange!r}")
 
     a = alert.lower()
 
@@ -832,7 +832,7 @@ def open_position_with_brackets(IB_INSTANCE,
     parent = MarketOrder(action, abs(int(qty)))
     trade = IB_INSTANCE.placeOrder(contract, parent)
 
-    log_step("PARENT_ORDER_SUBMITTED")
+    #log_step("PARENT_ORDER_SUBMITTED")
 
     # ------------------------------------------------
     # 2️⃣ WAIT FOR FILL
@@ -898,9 +898,9 @@ def open_position_with_brackets(IB_INSTANCE,
     IB_INSTANCE.sleep(0.5)
     IB_INSTANCE.waitOnUpdate(timeout=2)
 
-    log_step("BRACKET_CHILDREN_SUBMITTED")
+    #log_step("BRACKET_CHILDREN_SUBMITTED")
     log_step(f"PositionsAfter: {len(IB_INSTANCE.positions())}")
-    log_step(f"TradesAfter:    {len(IB_INSTANCE.openTrades())}")
+    log_step(f"OrdersAfter:    {len(IB_INSTANCE.openTrades())}")
     if len(IB_INSTANCE.positions()) == 0:
         log_step("[ALARM] No positions were opened")
     if len(IB_INSTANCE.openTrades()) == 0:
@@ -1290,11 +1290,17 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
     #         "ok": False,
     #         "error": "ib_not_connected",
     #     }
-    log_step(
-        f"DEBUG acct={ACCOUNT_SHORT_NAME} port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
+    # log_step(
+    #     f"DEBUG acct={ACCOUNT_SHORT_NAME} port={4002+DERIVED_ID} clientId={1+DERIVED_ID}")
 
+    # log_step(
+    #     f"EXEC_START alert={sig.raw_alert} "
+    #     f"symbol={sig.symbol} "
+    #     f"dir={'SELL' if sig.desired_direction == -1 else 'BUY'} "
+    #     f"qty={sig.desired_qty}"
+    # )
     log_step(
-        f"EXEC_START alert={sig.raw_alert} "
+        f"alert={sig.raw_alert} "
         f"symbol={sig.symbol} "
         f"dir={'SELL' if sig.desired_direction == -1 else 'BUY'} "
         f"qty={sig.desired_qty}"
@@ -1314,9 +1320,9 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
     try:
 
-        logger.info(f"{IB_INSTANCE.positions()}")
+        #logger.info(f"{IB_INSTANCE.positions()}")
         contract = build_contract(sig)
-        logger.info(f"{contract}")
+        #logger.info(f"{contract}")
         # Qualify contract and detect ambiguity
         qualified = IB_INSTANCE.qualifyContracts(contract)
         # qualified = True
@@ -1843,8 +1849,8 @@ def webhook() -> Any:
         settings = settings_cache.get()
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         sig = parse_signal(payload)
-        logger.info(
-            f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
+        # logger.info(
+        #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
         now_local = now_in_market_tz(settings)
         open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
