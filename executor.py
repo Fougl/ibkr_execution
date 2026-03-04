@@ -291,6 +291,20 @@ class SettingsCache:
 settings_cache = SettingsCache()
 
 
+_market_times_lock = threading.Lock()
+
+_market_times = {
+    "prev_open": None,
+    "prev_close": None,
+    "next_open": None,
+    "next_close": None,
+    "prev_preclose": None,
+    "next_preclose": None,
+    "prev_postopen": None,
+    "next_postopen": None
+}
+
+
 # PARAM_PATHS = [
 #     "/ankro/settings/delay_sec",
 #     "/ankro/settings/execution_delay",
@@ -386,31 +400,19 @@ def market_datetimes(now_local: datetime, settings: Settings):
 
     open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
     close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
-
-    # logger.info(f"[DEBUG/MH] Parsed market_open={settings.market_open}, market_close={settings.market_close}")
-    # logger.info(f"[DEBUG/MH] Initial open_dt={open_dt}, close_dt={close_dt}")
-
-    # ============================================================
-    # OVERNIGHT SESSION FIX (CORRECT, SINGLE BLOCK)
-    # ============================================================
-    if close_dt <= open_dt:
-        # logger.info("[DEBUG/MH] Overnight session detected")
-
-        if now_local < open_dt:
-            # After midnight but before today's open → session started yesterday
-            # logger.info("[DEBUG/MH] now_local < open_dt → shifting open_dt to previous day")
-            open_dt = open_dt - timedelta(days=1)
-            # DO NOT shift close_dt here
-        else:
-            # After today's open → close_dt belongs to the next day
-            close_dt_next = close_dt + timedelta(days=1)
-            # logger.info(f"[DEBUG/MH] now_local >= open_dt → shifting close_dt to next day: {close_dt_next}")
-            close_dt = close_dt_next
-    # else:
-    #     logger.info("[DEBUG/MH] Normal daytime session (no overnight shift).")
-
+    
     preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
     reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
+
+
+    if now_local < reopen_dt:
+        open_dt = open_dt - timedelta(days=1)
+    
+    if now_local < preclose_dt:
+        close_dt = close_dt - timedelta(days=1)
+
+
+    
 
     # FINAL LOGGING
     # logger.info(
@@ -421,6 +423,37 @@ def market_datetimes(now_local: datetime, settings: Settings):
     # )
 
     return open_dt, close_dt, preclose_dt, reopen_dt
+
+def rebuild_market_timeline(settings: Settings):
+    now_local = now_in_market_tz(settings)
+
+    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+
+    with _market_times_lock:
+
+
+        prev_open = open_dt
+        prev_close = close_dt
+        next_open = open_dt + timedelta(days=1)
+        next_close = close_dt + timedelta(days=1)
+
+
+        prev_preclose = preclose_dt
+        next_preclose = next_close - timedelta(minutes=settings.pre_close_min)
+
+        prev_postopen = reopen_dt
+        next_postopen = next_open + timedelta(minutes=settings.post_open_min)
+
+        _market_times.update({
+            "prev_open": prev_open,
+            "prev_close": prev_close,
+            "next_open": next_open,
+            "next_close": next_close,
+            "prev_preclose": prev_preclose,
+            "next_preclose": next_preclose,
+            "prev_postopen": prev_postopen,
+            "next_postopen": next_postopen,
+        })
 
 
 def in_trading_window(now_local: datetime, settings: Settings) -> bool:
@@ -433,31 +466,24 @@ def in_trading_window(now_local: datetime, settings: Settings) -> bool:
     Both values come from the SSM /ankro/settings JSON.
     Overnight sessions still handled by market_datetimes().
     """
-    # market_datetimes currently returns:
-    #   open_dt  = raw market_open (with overnight handling)
-    #   close_dt = raw market_close (with overnight handling)
-    #   preclose_dt = close_dt - pre_close_min
-    #   reopen_dt   = open_dt  + post_open_min
+
     open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
         now_local, settings)
 
-    # Effective trading window
-    trading_open = reopen_dt         # market_open + post_open_min
-    trading_close = preclose_dt      # market_close - pre_close_min
-
-    # logger.info(f"[TIMECHK] now_local={now_local.isoformat()}")
-    # logger.info(
-    #     f"[TIMECHK] trading_open={trading_open.isoformat()} "
-    #     f"(market_open+post_open_min)"
-    # )
-    # logger.info(
-    #     f"[TIMECHK] trading_close={trading_close.isoformat()} "
-    #     f"(market_close-pre_close_min)"
-    # )
+    trading_open = reopen_dt         
+    trading_close = preclose_dt     
 
     ok = trading_open <= now_local <= trading_close
-    #logger.info(f"[TIMECHK] RESULT={ok}")
+
     return ok
+
+def in_trading_window(now_local):
+
+    with _market_times_lock:
+        prev_preclose = _market_times["prev_preclose"]
+        next_postopen = _market_times["next_postopen"]
+
+    return not (prev_preclose <= now_local < next_postopen)
 
 
 def within_preclose_window(now_local: datetime, settings: Settings) -> bool:
@@ -733,26 +759,41 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     try:
         order = MarketOrder(action, abs(int(qty)))
-        IB_INSTANCE.placeOrder(contract, order)
+        trade=IB_INSTANCE.placeOrder(contract, order)
+        timeout = time.time() + 5
+
+        while time.time() < timeout:
+            IB_INSTANCE.waitOnUpdate(timeout=1)
+        
+            if trade.fills:
+                break
     except Exception as e:
         log_step(f"CLOSE_POSITION_FAIL: error={e}")
         return
+    if not trade.fills:
+        log_step("CLOSE_POSITION_FAIL")
+        return {
+            "ok": True,                         # <-- critical
+            "action": "fill_timeout_no_entry",
+            "reason": "market_not_filling",
+            "executed": False
+        }
+    log_step("CLOSE_POSITION_SUCCESS")
+    # # More robust wait loop: IB updates positions asynchronously
+    # for i in range(15):      # ~15 seconds worst-case
+    #     # IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
+    #     # IB_INSTANCE.sleep(0.2)
 
-    # More robust wait loop: IB updates positions asynchronously
-    for i in range(15):      # ~15 seconds worst-case
-        # IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
-        # IB_INSTANCE.sleep(0.2)
+    #     # Force refresh from IB — important!
+    #     # IB_INSTANCE.reqPositions()
+    #     # IB_INSTANCE.waitOnUpdate(timeout=0.5)
 
-        # Force refresh from IB — important!
-        # IB_INSTANCE.reqPositions()
-        # IB_INSTANCE.waitOnUpdate(timeout=0.5)
+    #     remaining = current_position_qty(IB_INSTANCE, contract)
+    #     if remaining == 0:
+    #         log_step(f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
+    #         return
 
-        remaining = current_position_qty(IB_INSTANCE, contract)
-        if remaining == 0:
-            log_step(f"CLOSE_POSITION_SUCCESS (confirmed after {i+1} checks)")
-            return
-
-    log_step(f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
+    # log_step(f"CLOSE_POSITION_FAIL: still_open={remaining} after retries")
 
 
 def _round_to_tick(price: float, tick: float) -> float:
@@ -1448,11 +1489,12 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         # ----------------------------------------------------------
         if sig.desired_direction == 0:
             # logger.info(f"[EXEC] Branch=EXIT acct={ACCOUNT_SHORT_NAME} current_qty={qty}")
-            cancel_all_open_orders(IB_INSTANCE,
-                                   reason="exit_signal",
-                                   contract=contract
-                                   )
+            
             if qty == 0:
+                cancel_all_open_orders(IB_INSTANCE,
+                                       reason="exit_signal",
+                                       contract=contract
+                                       )
                 log_step("No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
                 # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
@@ -1476,6 +1518,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
+            cancel_all_open_orders(IB_INSTANCE,
+                                   reason="exit_signal",
+                                   contract=contract
+                                   )
             log_step("Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
             # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
@@ -1490,8 +1536,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             log_step("[EXEC] Exit Long signal received")
 
             if qty > 0:   # only close long positions
-                cancel_all_open_orders(
-                    IB_INSTANCE, reason="exit_long", contract=contract)
+                
                 close_position(IB_INSTANCE, contract, qty)
                 if not wait_until_flat(IB_INSTANCE, contract, settings):
                     log_step("[ALARM] Exit close not reflected — retrying")
@@ -1504,6 +1549,8 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                     # IB_INSTANCE.disconnect()
                     flush_account_log("WEBHOOK_EXEC")
                     return result
+                cancel_all_open_orders(
+                    IB_INSTANCE, reason="exit_long", contract=contract)
                 result.update({"ok": True, "action": "exit_long_closed"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
@@ -1521,8 +1568,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             log_step("[EXEC] Exit Short signal received")
 
             if qty < 0:   # only close short positions
-                cancel_all_open_orders(
-                    IB_INSTANCE, reason="exit_short", contract=contract)
+                
                 close_position(IB_INSTANCE, contract, qty)
                 if not wait_until_flat(IB_INSTANCE, contract, settings):
                     log_step("[ALARM] Exit close not reflected — retrying")
@@ -1535,6 +1581,8 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                     # IB_INSTANCE.disconnect()
                     flush_account_log("WEBHOOK_EXEC")
                     return result
+                cancel_all_open_orders(
+                    IB_INSTANCE, reason="exit_short", contract=contract)
                 result.update({"ok": True, "action": "exit_short_closed"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
@@ -1567,8 +1615,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
             log_step(
                 f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(IB_INSTANCE, contract, qty)
-            cancel_all_open_orders(
-                IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
+            
             # time.sleep(1)
 
             # Retry close
@@ -1583,6 +1630,8 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 # IB_INSTANCE.disconnect()
                 flush_account_log("WEBHOOK_EXEC")
                 return result
+            cancel_all_open_orders(
+                IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
 
                 # if not wait_until_flat(contract, settings):
                 #     result.update({"ok": False, "action": "reversal_close_not_confirmed"})
@@ -1766,6 +1815,7 @@ def background_scheduler_loop():
         try:
             settings = settings_cache.get()
             now_local = now_in_market_tz(settings)
+            #rebuild_market_timeline(settings)
 
             open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
                 now_local, settings)
@@ -1791,38 +1841,32 @@ def background_scheduler_loop():
             # ==========================================
             # PRE-CLOSE WINDOW — run ONCE per market day
             # ==========================================
-            if preclose_dt <= now_local:
-                if last_preclose_run_day != market_day:
+            if _market_times["next_preclose"] <= now_local:
+                logger.info(
+                    "Triggering pre-close ensure for market day %s", market_day)
+                IB_INSTANCE = connect_ib_for_webhook()
+                if IB_INSTANCE and IB_INSTANCE.isConnected():
+                    ensure_preclose_close_if_needed(IB_INSTANCE, settings)
+                else:
                     logger.info(
-                        "Triggering pre-close ensure for market day %s", market_day)
-                    # accounts = secrets_cache.get_accounts()
-                    # logger.info(f"[HTTP] Accounts found={len(accounts)}")
-                    # if accounts:
-                    IB_INSTANCE = connect_ib_for_webhook()
-                    if IB_INSTANCE and IB_INSTANCE.isConnected():
-                        ensure_preclose_close_if_needed(IB_INSTANCE, settings)
-                    else:
-                        logger.info(
-                            "[ALARM] Preclose: IB not able to connected")
-                    last_preclose_run_day = market_day
+                        "[ALARM] Preclose: IB not able to connected")
 
             # ==========================================
             # POST-OPEN WINDOW — run ONCE per market day
             # ==========================================
-            if reopen_dt <= now_local and settings.post_open_min:
-                if last_postopen_run_day != market_day:
+            if _market_times["next_postopen"] <= now_local and settings.post_open_min:
+                logger.info(
+                    "Triggering post-open ensure for market day %s", market_day)
+
+                IB_INSTANCE = connect_ib_for_webhook()
+                if IB_INSTANCE and IB_INSTANCE.isConnected():
+                    ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
+                else:
                     logger.info(
-                        "Triggering post-open ensure for market day %s", market_day)
-                    # accounts = secrets_cache.get_accounts()
-                    # logger.info(f"[HTTP] Accounts found={len(accounts)}")
-                    # if accounts:
-                    IB_INSTANCE = connect_ib_for_webhook()
-                    if IB_INSTANCE and IB_INSTANCE.isConnected():
-                        ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
-                    else:
-                        logger.info(
-                            "[ALARM] Postopen: IB not able to connected")
-                    last_postopen_run_day = market_day
+                        "[ALARM] Postopen: IB not able to connected")
+
+                    
+            rebuild_market_timeline(settings)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
@@ -1875,11 +1919,11 @@ def webhook() -> Any:
         #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
         now_local = now_in_market_tz(settings)
-        open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+        #open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
 
         # delay of 1 minute after reopen (custom)
         extra_webhook_delay_min = 1
-        webhook_allowed_dt = reopen_dt + timedelta(minutes=extra_webhook_delay_min)
+        webhook_allowed_dt = _market_times["prev_postopen"] + timedelta(minutes=extra_webhook_delay_min)
         if now_local < webhook_allowed_dt:
             logger.info(
                 f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
@@ -1893,7 +1937,7 @@ def webhook() -> Any:
             }), 200
 
         # market hours gating
-        if not in_trading_window(now_local, settings):
+        if not in_trading_window(now_local):
             logger.info(
                 f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open_close={market_datetimes(now_local, settings)[2:]}")
             logger.info(
