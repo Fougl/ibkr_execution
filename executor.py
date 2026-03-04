@@ -1809,7 +1809,8 @@ def background_scheduler_loop():
 
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
-
+    settings = settings_cache.get()
+    rebuild_market_timeline(settings)
     while True:
         #logger.info("Background scheduler thread started.")
         try:
