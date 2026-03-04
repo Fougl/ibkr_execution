@@ -482,10 +482,11 @@ def rebuild_market_timeline(settings: Settings):
 def in_trading_window(now_local):
 
     with _market_times_lock:
-        prev_preclose = _market_times["prev_preclose"]
+        next_preclose = _market_times["next_preclose"]
+        #prev_postopen = _market_times["prev_postopen"]
         next_postopen = _market_times["next_postopen"]
 
-    return not (prev_preclose <= now_local < next_postopen)
+    return  next_preclose<next_postopen
 
 
 def within_preclose_window(now_local: datetime, settings: Settings) -> bool:
@@ -1942,7 +1943,7 @@ def webhook() -> Any:
         # market hours gating
         if not in_trading_window(now_local):
             logger.info(
-                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open_close={market_datetimes(now_local, settings)[2:]}")
+                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['prev_postopen']} close={_market_times['prev_postopen']} ")
             logger.info(
                 f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
             return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
