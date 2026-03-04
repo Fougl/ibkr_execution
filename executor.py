@@ -687,9 +687,11 @@ def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
                 if getattr(c, "localSymbol", None) != symbol and getattr(c, "symbol", None) != symbol:
                     continue
 
-            IB_INSTANCE.cancelOrder(o)
+            if not t.isDone():
+                IB_INSTANCE.cancelOrder(o)
 
         except:
+            log_step(f"[ALARM] Error cancelling order {o}.")
             continue
 
     log_step("CANCEL_OPEN_ORDERS: DONE")
@@ -742,8 +744,8 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         # IB_INSTANCE.sleep(0.2)
 
         # Force refresh from IB — important!
-        IB_INSTANCE.reqPositions()
-        IB_INSTANCE.waitOnUpdate(timeout=0.5)
+        # IB_INSTANCE.reqPositions()
+        # IB_INSTANCE.waitOnUpdate(timeout=0.5)
 
         remaining = current_position_qty(IB_INSTANCE, contract)
         if remaining == 0:
@@ -1092,9 +1094,24 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
 
 def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
 
+    # now_local = now_in_market_tz(settings)
+
+    # dayk = state_key_for_day(now_local.date())
+    
     now_local = now_in_market_tz(settings)
 
-    dayk = state_key_for_day(now_local.date())
+    open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
+    
+    # --------------------------------------------------
+    # FIX: determine correct state day
+    # --------------------------------------------------
+    if open_dt < close_dt:
+        # normal daytime session
+        state_day = now_local.date()
+    else:
+        # overnight session → snapshot stored on previous day
+        state_day = (now_local - timedelta(days=1)).date()
+    dayk = state_key_for_day(state_day)
 
     # Ensure persistent global IB connection is alive
     # if not IB_INSTANCE or not IB_INSTANCE.isConnected():
@@ -1368,8 +1385,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
         except:
             log_step("[ALARM] Error fetching open trades.")
-            trades = []
-
+            result.update({
+                "ok": False,
+                "action": "error_fetchin_open_trades",                # INFO: early return
+                "reason": "error_fetchin_open_trades"
+            })
+            flush_account_log("WEBHOOK_EXEC")
+            return result
         filtered = []
         for t in trades:
             try:
@@ -1788,7 +1810,7 @@ def background_scheduler_loop():
             # POST-OPEN WINDOW — run ONCE per market day
             # ==========================================
             if reopen_dt <= now_local and settings.post_open_min:
-                if last_postopen_run_day and last_postopen_run_day != market_day:
+                if last_postopen_run_day != market_day:
                     logger.info(
                         "Triggering post-open ensure for market day %s", market_day)
                     # accounts = secrets_cache.get_accounts()
@@ -1800,7 +1822,7 @@ def background_scheduler_loop():
                     else:
                         logger.info(
                             "[ALARM] Postopen: IB not able to connected")
-                last_postopen_run_day = market_day
+                    last_postopen_run_day = market_day
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
