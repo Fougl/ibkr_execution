@@ -697,8 +697,9 @@ def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
 
     try:
         trades = IB_INSTANCE.openTrades()
-    except:
-        trades = []
+    except Exception as e:
+        log_step("[ALARM] Error fetching open trades.")
+        raise RuntimeError("openTrades failed")
 
     if not trades:
         log_step("CANCEL_OPEN_ORDERS: NONE")
@@ -706,7 +707,9 @@ def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
 
     for t in trades:
         try:
-            o = t.order
+            o = getattr(t, "order", None)
+            if not o:
+                continue
             c = t.contract
 
             if contract is not None:
@@ -719,9 +722,9 @@ def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
             if not t.isDone():
                 IB_INSTANCE.cancelOrder(o)
 
-        except:
-            log_step(f"[ALARM] Error cancelling order {o}.")
-            continue
+        except Exception as e:
+            log_step(f"[ALARM] Error cancelling order: {e}")
+            raise
 
     log_step("CANCEL_OPEN_ORDERS: DONE")
 
@@ -769,19 +772,13 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
             IB_INSTANCE.waitOnUpdate(timeout=1)
         
             if trade.fills:
-                break
+                log_step("CLOSE_POSITION_SUCCESS")
+                return
     except Exception as e:
         log_step(f"CLOSE_POSITION_FAIL: error={e}")
-        return
-    if not trade.fills:
-        log_step("CLOSE_POSITION_FAIL")
-        return {
-            "ok": True,                         # <-- critical
-            "action": "fill_timeout_no_entry",
-            "reason": "market_not_filling",
-            "executed": False
-        }
-    log_step("CLOSE_POSITION_SUCCESS")
+        raise
+    log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
+    raise RuntimeError("close_position_fill_timeout")
     # # More robust wait loop: IB updates positions asynchronously
     # for i in range(15):      # ~15 seconds worst-case
     #     # IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
@@ -1144,17 +1141,17 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
     
     now_local = now_in_market_tz(settings)
 
-    open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
-    
+    #open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
+    state_day=_market_times["prev_close"].date()
     # --------------------------------------------------
     # FIX: determine correct state day
     # --------------------------------------------------
-    if open_dt < close_dt:
-        # normal daytime session
-        state_day = now_local.date()
-    else:
-        # overnight session → snapshot stored on previous day
-        state_day = (now_local - timedelta(days=1)).date()
+    # if open_dt < close_dt:
+    #     # normal daytime session
+    #     state_day = now_local.date()
+    # else:
+    #     # overnight session → snapshot stored on previous day
+    #     state_day = (now_local - timedelta(days=1)).date()
     dayk = state_key_for_day(state_day)
 
     # Ensure persistent global IB connection is alive
@@ -1821,8 +1818,8 @@ def background_scheduler_loop():
             now_local = now_in_market_tz(settings)
             #rebuild_market_timeline(settings)
 
-            open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-                now_local, settings)
+            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+            #     now_local, settings)
             # logger.info(
             #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
             #     f"open_dt={open_dt.isoformat()} | "
@@ -1833,24 +1830,27 @@ def background_scheduler_loop():
             #     f"last_postopen_run_day={last_postopen_run_day}"
             # )
             # This defines the “trading day” — the day the market opens.
-            market_day = open_dt.date()
+            # market_day = open_dt.date()
 
             # 🚨 RESET LOGIC
             # If the market_day changed since last loop iteration => new trading day
-            if last_preclose_run_day != market_day:
-                last_preclose_run_day = None
-            if last_postopen_run_day != market_day:
-                last_postopen_run_day = None
+            # if last_preclose_run_day != market_day:
+            #     last_preclose_run_day = None
+            # if last_postopen_run_day != market_day:
+            #     last_postopen_run_day = None
 
             # ==========================================
             # PRE-CLOSE WINDOW — run ONCE per market day
             # ==========================================
             if _market_times["next_preclose"] <= now_local:
                 logger.info(
-                    "Triggering pre-close ensure for market day %s", market_day)
+                    "Triggering pre-close ensure")
                 IB_INSTANCE = connect_ib_for_webhook()
                 if IB_INSTANCE and IB_INSTANCE.isConnected():
                     ensure_preclose_close_if_needed(IB_INSTANCE, settings)
+
+                    IB_INSTANCE.disconnect()
+                    logger.info("[IB] Clean disconnect after webhook")
                 else:
                     logger.info(
                         "[ALARM] Preclose: IB not able to connected")
@@ -1860,11 +1860,13 @@ def background_scheduler_loop():
             # ==========================================
             if _market_times["next_postopen"] <= now_local and settings.post_open_min:
                 logger.info(
-                    "Triggering post-open ensure for market day %s", market_day)
+                    "Triggering post-open ensure")
 
                 IB_INSTANCE = connect_ib_for_webhook()
                 if IB_INSTANCE and IB_INSTANCE.isConnected():
                     ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
+                    IB_INSTANCE.disconnect()
+                    logger.info("[IB] Clean disconnect after webhook")
                 else:
                     logger.info(
                         "[ALARM] Postopen: IB not able to connected")
