@@ -458,26 +458,26 @@ def rebuild_market_timeline(settings: Settings):
         })
 
 
-def in_trading_window(now_local: datetime, settings: Settings) -> bool:
-    """
-    Trading window:
+# def in_trading_window(now_local: datetime, settings: Settings) -> bool:
+#     """
+#     Trading window:
 
-      trading_open  = market_open + post_open_min
-      trading_close = market_close - pre_close_min
+#       trading_open  = market_open + post_open_min
+#       trading_close = market_close - pre_close_min
 
-    Both values come from the SSM /ankro/settings JSON.
-    Overnight sessions still handled by market_datetimes().
-    """
+#     Both values come from the SSM /ankro/settings JSON.
+#     Overnight sessions still handled by market_datetimes().
+#     """
 
-    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-        now_local, settings)
+#     open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+#         now_local, settings)
 
-    trading_open = reopen_dt         
-    trading_close = preclose_dt     
+#     trading_open = reopen_dt         
+#     trading_close = preclose_dt     
 
-    ok = trading_open <= now_local <= trading_close
+#     ok = trading_open <= now_local <= trading_close
 
-    return ok
+#     return ok
 
 def in_trading_window(now_local):
 
@@ -1947,12 +1947,12 @@ def webhook() -> Any:
                 f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
             return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
 
-        if within_preclose_window(now_local, settings):
-            logger.info(
-                f"[CHECK] GATE within_preclose_window now={now_local.isoformat()}")
-            logger.info(
-                f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
-            return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
+        # if within_preclose_window(now_local, settings):
+        #     logger.info(
+        #         f"[CHECK] GATE within_preclose_window now={now_local.isoformat()}")
+        #     logger.info(
+        #         f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+        #     return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
 
         IB_INSTANCE = connect_ib_for_webhook()
         if not IB_INSTANCE or not IB_INSTANCE.isConnected():
