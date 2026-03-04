@@ -1943,7 +1943,7 @@ def webhook() -> Any:
         # market hours gating
         if not in_trading_window(now_local):
             logger.info(
-                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['prev_postopen']} close={_market_times['prev_postopen']} ")
+                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['next_postopen']} close={_market_times['next_preclose']} ")
             logger.info(
                 f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
             return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
