@@ -407,9 +407,11 @@ def market_datetimes(now_local: datetime, settings: Settings):
 
     if now_local < reopen_dt:
         open_dt = open_dt - timedelta(days=1)
+        reopen_dt = reopen_dt - timedelta(days=1)
     
     if now_local < preclose_dt:
         close_dt = close_dt - timedelta(days=1)
+        preclose_dt = preclose_dt - timedelta(days=1)
 
 
     
