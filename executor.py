@@ -743,8 +743,9 @@ def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
             except Exception:
                 log_step("[ALARM] Error fetching open position.")
                 continue
-    except:
+    except Exception as e:
         log_step("[ALARM] Error fetching open positions.")
+        raise
 
     return qty
 
@@ -1172,7 +1173,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
         if not entry:
             log_step("Nothing to reopen")
             return
-        if entry.get("reopen_done") or entry.get("done"):
+        if entry.get("reopen_done"):# or entry.get("done"):
             log_step("Postopen was already triggered")
             return
 
@@ -1850,7 +1851,7 @@ def background_scheduler_loop():
                     ensure_preclose_close_if_needed(IB_INSTANCE, settings)
 
                     IB_INSTANCE.disconnect()
-                    logger.info("[IB] Clean disconnect after webhook")
+                    logger.info("[IB] Clean disconnect after preclose")
                 else:
                     logger.info(
                         "[ALARM] Preclose: IB not able to connected")
@@ -1866,7 +1867,7 @@ def background_scheduler_loop():
                 if IB_INSTANCE and IB_INSTANCE.isConnected():
                     ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
                     IB_INSTANCE.disconnect()
-                    logger.info("[IB] Clean disconnect after webhook")
+                    logger.info("[IB] Clean disconnect after postopen")
                 else:
                     logger.info(
                         "[ALARM] Postopen: IB not able to connected")
