@@ -141,6 +141,28 @@ logger.propagate = False
 IB_LOCK = threading.Lock()
 IB_INSTANCE: IB | None = None
 IB_READY = threading.Event()
+import signal
+import sys
+import atexit
+
+def shutdown_handler(signum=None, frame=None):
+    global IB_INSTANCE
+
+    logger.info("[IB] shutdown requested")
+
+    try:
+        if IB_INSTANCE and IB_INSTANCE.isConnected():
+            IB_INSTANCE.disconnect()
+            logger.info("[IB] disconnected cleanly")
+    except Exception as e:
+        logger.error(f"[IB] disconnect error: {e}")
+
+    sys.exit(0)
+
+# register shutdown handlers
+signal.signal(signal.SIGTERM, shutdown_handler)
+signal.signal(signal.SIGINT, shutdown_handler)
+atexit.register(shutdown_handler)
 
 async def ib_connect_persistent():
 
