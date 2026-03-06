@@ -887,7 +887,7 @@ def get_min_tick(IB_INSTANCE, contract: Contract) -> float:
 
     # Ask IB for ContractDetails
     try:
-        details = IB_INSTANCE.ContractDetails(contract)
+        details = contract.ContractDetails(contract)
         #IB_INSTANCE.waitOnUpdate(timeout=2)
         if not details:
             raise RuntimeError("reqContractDetails returned empty")
