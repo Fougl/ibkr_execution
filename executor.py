@@ -775,15 +775,19 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         order = MarketOrder(action, abs(int(qty)))
         trade = IB_INSTANCE.placeOrder(contract, order)
     
-        async def _wait_fill(trade):
-            await asyncio.wait_for(trade.filledEvent, timeout=5)
+        timeout = time.time() + 5
+        fill_price = None
         
-        future = asyncio.run_coroutine_threadsafe(
-            _wait_fill(trade),
-            IB_INSTANCE.loop
-        )
+        while time.time() < timeout:
+        
+            if trade.isDone() or trade.fills:
+                if trade.fills:
+                    fill_price = trade.fills[-1].execution.price
+                break
     
-        future.result(timeout=6)
+        
+        if not fill_price:
+            raise RuntimeError("fill_timeout")
     
         log_step("CLOSE_POSITION_SUCCESS")
         return
@@ -901,17 +905,21 @@ def open_position_with_brackets(IB_INSTANCE,
     timeout = time.time() + 10
 
     try:
-        async def _wait_fill(trade):
-            await asyncio.wait_for(trade.filledEvent, timeout=5)
+        timeout = time.time() + 5
+        fill_price = None
         
-        future = asyncio.run_coroutine_threadsafe(
-            _wait_fill(trade),
-            IB_INSTANCE.loop
-        )
-    
-        future.result()
-    
-        fill_price = trade.fills[-1].execution.price
+        while time.time() < timeout:
+        
+            if trade.isDone() or trade.fills:
+                if trade.fills:
+                    fill_price = trade.fills[-1].execution.price
+                break
+        
+            time.sleep(0.05)
+        
+        if not fill_price:
+            raise RuntimeError("fill_timeout")
+
 
     except Exception:
         raise RuntimeError("fill_timeout")
