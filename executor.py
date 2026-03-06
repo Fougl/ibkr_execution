@@ -864,13 +864,17 @@ def get_min_tick(contract):
     async def _req():
         return await IB_INSTANCE.reqContractDetailsAsync(contract)
 
-    future = asyncio.run_coroutine_threadsafe(_req(), IB_LOOP)
+    future = asyncio.run_coroutine_threadsafe(
+        IB_INSTANCE.reqContractDetailsAsync(contract),
+        IB_LOOP
+    )
     details = future.result(timeout=5)
 
     if not details:
         raise RuntimeError("reqContractDetails returned empty")
     log_step("min tick fetched")
     return float(details[0].minTick)
+
 
 
 def open_position_with_brackets(IB_INSTANCE,
