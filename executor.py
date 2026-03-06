@@ -861,17 +861,7 @@ def _round_to_tick(price: float, tick: float) -> float:
 
 def get_min_tick(contract):
 
-    def _submit():
-        return asyncio.ensure_future(
-            IB_INSTANCE.reqContractDetailsAsync(contract)
-        )
-
-    future = asyncio.run_coroutine_threadsafe(
-        asyncio.to_thread(_submit),
-        IB_LOOP
-    )
-
-    details = future.result(timeout=5)
+    details = IB_INSTANCE.reqContractDetails(contract)
 
     if not details:
         raise RuntimeError("reqContractDetails returned empty")
