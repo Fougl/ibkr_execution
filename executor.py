@@ -139,38 +139,41 @@ logger.handlers = [handler]    # IMPORTANT: removes stdout handler
 logger.propagate = False
 
 IB_LOCK = threading.Lock()
+IB_INSTANCE: IB | None = None
+IB_READY = threading.Event()
 
+async def ib_connect_persistent():
 
-def connect_ib_for_webhook():
-    """
-    FIX: Waitress threads have no asyncio event loop → ib.connect() fails.
-    We create a dummy event loop before ib.connect().
-    """
-    # ----------------------------
-    # 🔧 Install an event loop
-    # ----------------------------
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    global IB_INSTANCE
 
     ib = IB()
 
     port = 4002 + DERIVED_ID
     cid = 1 + DERIVED_ID
 
-    try:
-        ib.connect(
-            host='127.0.0.1',
-            port=port,
-            clientId=cid,
-            timeout=5
-        )
-        return ib
-    except Exception as e:
-        logger.error(f"[IB] Webhook-connect failed: {e}")
-        return None
+    await ib.connectAsync(
+        "127.0.0.1",
+        port,
+        clientId=cid,
+        timeout=5
+    )
+
+    IB_INSTANCE = ib
+    IB_READY.set()
+
+    logger.info("[IB] Persistent async connection established")
+
+
+def start_ib():
+
+    loop = asyncio.new_event_loop()
+
+    def runner():
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(ib_connect_persistent())
+        loop.run_forever()
+
+    threading.Thread(target=runner, daemon=True).start()
 
 
 def disconnect_ib(ib: IB):
@@ -766,18 +769,24 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     try:
         order = MarketOrder(action, abs(int(qty)))
-        trade=IB_INSTANCE.placeOrder(contract, order)
-        timeout = time.time() + 5
-
-        while time.time() < timeout:
-            IB_INSTANCE.waitOnUpdate(timeout=1)
-        
-            if trade.fills:
-                log_step("CLOSE_POSITION_SUCCESS")
-                return
+        trade = IB_INSTANCE.placeOrder(contract, order)
+    
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(trade.filledEvent, timeout=5),
+            IB_INSTANCE.loop
+        )
+    
+        future.result(timeout=6)
+    
+        log_step("CLOSE_POSITION_SUCCESS")
+        return
+    
     except Exception as e:
-        log_step(f"CLOSE_POSITION_FAIL: error={e}")
-        raise
+        if "TimeoutError" in str(e):
+            log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
+        else:
+            log_step(f"CLOSE_POSITION_FAIL: error={e}")
+            raise
     log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
     raise RuntimeError("close_position_fill_timeout")
     # # More robust wait loop: IB updates positions asynchronously
@@ -837,8 +846,8 @@ def get_min_tick(IB_INSTANCE, contract: Contract) -> float:
 
     # Ask IB for ContractDetails
     try:
-        details = IB_INSTANCE.reqContractDetails(contract)
-        IB_INSTANCE.waitOnUpdate(timeout=2)
+        details = IB_INSTANCE.ContractDetails(contract)
+        #IB_INSTANCE.waitOnUpdate(timeout=2)
         if not details:
             raise RuntimeError("reqContractDetails returned empty")
         mt = float(details[0].minTick)
@@ -884,11 +893,18 @@ def open_position_with_brackets(IB_INSTANCE,
     fill_price = None
     timeout = time.time() + 10
 
-    while time.time() < timeout:
-        IB_INSTANCE.waitOnUpdate(timeout=1)
-        if trade.fills:
-            fill_price = trade.fills[-1].execution.price
-            break
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            asyncio.wait_for(trade.filledEvent, timeout=5),
+            IB_INSTANCE.loop
+        )
+    
+        future.result()
+    
+        fill_price = trade.fills[-1].execution.price
+
+    except Exception:
+        raise RuntimeError("fill_timeout")
     log_step(
         f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     if not fill_price:
@@ -1001,8 +1017,8 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
         # SNAPSHOT OPEN TRADES (NOT openOrders)
         # =======================================================
         try:
-            IB_INSTANCE.reqOpenOrders()
-            IB_INSTANCE.waitOnUpdate(timeout=2)
+            IB_INSTANCE.OpenOrders()
+            #IB_INSTANCE.waitOnUpdate(timeout=2)
         except Exception:
             pass
 
@@ -1846,11 +1862,12 @@ def background_scheduler_loop():
             if _market_times["next_preclose"] <= now_local:
                 logger.info(
                     "Triggering pre-close ensure")
-                IB_INSTANCE = connect_ib_for_webhook()
+                #IB_INSTANCE = connect_ib_for_webhook()
                 if IB_INSTANCE and IB_INSTANCE.isConnected():
-                    ensure_preclose_close_if_needed(IB_INSTANCE, settings)
+                    with IB_LOCK:
+                        ensure_preclose_close_if_needed(IB_INSTANCE, settings)
 
-                    IB_INSTANCE.disconnect()
+                    #IB_INSTANCE.disconnect()
                     logger.info("[IB] Clean disconnect after preclose")
                 else:
                     logger.info(
@@ -1863,10 +1880,11 @@ def background_scheduler_loop():
                 logger.info(
                     "Triggering post-open ensure")
 
-                IB_INSTANCE = connect_ib_for_webhook()
+                #IB_INSTANCE = connect_ib_for_webhook()
                 if IB_INSTANCE and IB_INSTANCE.isConnected():
-                    ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
-                    IB_INSTANCE.disconnect()
+                    with IB_LOCK:
+                        ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
+                    #IB_INSTANCE.disconnect()
                     logger.info("[IB] Clean disconnect after postopen")
                 else:
                     logger.info(
@@ -1900,6 +1918,13 @@ def start_scheduler():
 
 
 start_scheduler()
+
+
+# def start_ib_connection():
+#     t = threading.Thread(target=ib_connection_manager, daemon=True)
+#     t.start()
+    
+start_ib()
 # start_ib_connection()
 # ---------------------------
 # Flask app
@@ -1909,7 +1934,7 @@ app = Flask(__name__)
 
 @app.post("/webhook")
 def webhook() -> Any:
-    # global IB_INSTANCE
+    global IB_INSTANCE
     logger.info("===HTTP /webhook received")
 
     try:
@@ -1958,28 +1983,28 @@ def webhook() -> Any:
         #         f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
         #     return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
 
-        IB_INSTANCE = connect_ib_for_webhook()
+        #IB_INSTANCE = connect_ib_for_webhook()
         if not IB_INSTANCE or not IB_INSTANCE.isConnected():
             logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
             return jsonify({"ok": False, "error": "ib_not_connected"}), 503
-
-        result = execute_signal_for_account(IB_INSTANCE, sig, settings)
+        with IB_LOCK:
+            result = execute_signal_for_account(IB_INSTANCE, sig, settings)
         return jsonify({"ok": result["ok"], "result": result}), 200
 
     except Exception as e:
         logger.exception(
             f"[ALARM] Webhook handling failed. payload={payload} err={e}")
         return jsonify({"ok": False, "error": str(e)}), 400
-    finally:
+    #finally:
         # 🔥 CRITICAL — disconnect exactly once
-        try:
-            if IB_INSTANCE and IB_INSTANCE.isConnected():
-                IB_INSTANCE.disconnect()
-                logger.info("[IB] Clean disconnect after webhook")
-        except Exception:
-            pass
+        # try:
+        #     if IB_INSTANCE and IB_INSTANCE.isConnected():
+        #         IB_INSTANCE.disconnect()
+        #         logger.info("[IB] Clean disconnect after webhook")
+        # except Exception:
+        #     pass
         # logger.info("[IB] Clean disconnect after webhook")
-        IB_INSTANCE = None  # cleanup
+        #IB_INSTANCE = None  # cleanup
 
     # except ExecError as e:
     #     # Expected, domain-level problems
