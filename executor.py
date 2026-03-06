@@ -146,24 +146,43 @@ import signal
 import sys
 import atexit
 
+_shutdown_called = False
+
+def _ib_disconnect():
+    if IB_INSTANCE and IB_INSTANCE.isConnected():
+        IB_INSTANCE.disconnect()
+
 def shutdown_handler(signum=None, frame=None):
-    global IB_INSTANCE
+    global _shutdown_called
+
+    if _shutdown_called:
+        return
+    _shutdown_called = True
 
     logger.info("[IB] shutdown requested")
 
     try:
-        if IB_INSTANCE and IB_INSTANCE.isConnected():
-            IB_INSTANCE.disconnect()
+        if IB_INSTANCE and IB_LOOP:
+            future = asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(_ib_disconnect),
+                IB_LOOP
+            )
+            future.result(timeout=3)
+
+            # stop the asyncio loop cleanly
+            IB_LOOP.call_soon_threadsafe(IB_LOOP.stop)
+
             logger.info("[IB] disconnected cleanly")
+
     except Exception as e:
         logger.error(f"[IB] disconnect error: {e}")
 
     sys.exit(0)
 
-# register shutdown handlers
 signal.signal(signal.SIGTERM, shutdown_handler)
 signal.signal(signal.SIGINT, shutdown_handler)
 atexit.register(shutdown_handler)
+
 
 async def ib_connect_persistent():
 
