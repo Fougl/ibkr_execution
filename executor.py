@@ -202,6 +202,13 @@ def start_ib():
 
     threading.Thread(target=runner, daemon=True).start()
 
+def run_ib(coro, timeout=10):
+    future = asyncio.run_coroutine_threadsafe(coro, IB_LOOP)
+    return future.result(timeout=timeout)
+
+async def ib_place_order(contract, order):
+    return IB_INSTANCE.placeOrder(contract, order)
+
 
 def disconnect_ib(ib: IB):
     try:
@@ -859,17 +866,41 @@ def _round_to_tick(price: float, tick: float) -> float:
     return float(out.quantize(Decimal("1") if decimals == 0 else Decimal("1").scaleb(-decimals)))
 
 
-def get_min_tick(contract):
-    log_step("min tick fetched")
-    details = contract.ContractDetails()
+def get_min_tick(IB_INSTANCE, contract: Contract) -> float:
+    """
+    Get ContractDetails.minTick for this contract, cached.
+    Requires contract to be qualified (conId known) or at least localSymbol stable.
+    """
+    key = None
+    try:
+        cid = getattr(contract, "conId", None)
+        if cid:
+            key = f"conId:{cid}"
+    except Exception:
+        pass
+    if not key:
+        key = f"localSymbol:{getattr(contract, 'localSymbol', '')}"
 
-    if not details:
-        raise RuntimeError("reqContractDetails returned empty")
+    with _MIN_TICK_LOCK:
+        if key in _MIN_TICK_CACHE:
+            return _MIN_TICK_CACHE[key]
 
-    log_step("min tick fetched")
+    # Ask IB for ContractDetails
+    try:
+        details = IB_INSTANCE.ContractDetails(contract)
+        #IB_INSTANCE.waitOnUpdate(timeout=2)
+        if not details:
+            raise RuntimeError("reqContractDetails returned empty")
+        mt = float(details[0].minTick)
+    except Exception as e:
+        log_step(f"[ALARM] MIN_TICK_FAIL: using fallback 0.01 err={e}")
+        mt = 0.01  # fallback so we don't crash; futures will still likely reject if wrong
 
-    return float(details[0].minTick)
+    with _MIN_TICK_LOCK:
+        _MIN_TICK_CACHE[key] = mt
 
+    log_step(f"MIN_TICK: {mt}")
+    return mt
 
 
 def open_position_with_brackets(IB_INSTANCE,
@@ -892,8 +923,10 @@ def open_position_with_brackets(IB_INSTANCE,
     # ------------------------------------------------
     # 1️⃣ SEND MARKET PARENT ONLY
     # ------------------------------------------------
+    log_step("start")
     parent = MarketOrder(action, abs(int(qty)))
-    trade = IB_INSTANCE.placeOrder(contract, parent)
+    trade = run_ib(ib_place_order(contract, parent))
+    log_step("finish")
 
     #log_step("PARENT_ORDER_SUBMITTED")
 
@@ -970,10 +1003,9 @@ def open_position_with_brackets(IB_INSTANCE,
     sl_order.ocaGroup = oca_group
     sl_order.ocaType = 1
 
-    IB_INSTANCE.placeOrder(contract, tp_order)
-    IB_INSTANCE.placeOrder(contract, sl_order)
-    IB_INSTANCE.sleep(0.5)
-    IB_INSTANCE.waitOnUpdate(timeout=2)
+    run_ib(ib_place_order(contract, tp_order))
+    run_ib(ib_place_order(contract, sl_order))
+
 
     #log_step("BRACKET_CHILDREN_SUBMITTED")
     log_step(f"PositionsAfter: {len(IB_INSTANCE.positions())}")
