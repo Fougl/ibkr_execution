@@ -165,13 +165,17 @@ async def ib_connect_persistent():
 
 
 def start_ib():
-
+    logger.info("[IB] starting async connection thread")
     loop = asyncio.new_event_loop()
 
     def runner():
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(ib_connect_persistent())
-        loop.run_forever()
+    
+        try:
+            loop.run_until_complete(ib_connect_persistent())
+            loop.run_forever()
+        except Exception as e:
+            logger.error(f"[IB] connection failed: {e}")
 
     threading.Thread(target=runner, daemon=True).start()
 
