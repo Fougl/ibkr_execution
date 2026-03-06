@@ -1017,7 +1017,17 @@ def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool
         # time.sleep(1)
     return False
 
+def qualify_contract(contract):
 
+    async def _qualify():
+        return await IB_INSTANCE.qualifyContractsAsync(contract)
+
+    future = asyncio.run_coroutine_threadsafe(
+        _qualify(),
+        IB_INSTANCE.loop
+    )
+
+    return future.result(timeout=5)
 # ---------------------------
 # Pre-close / post-open logic (ONLY runs when webhook arrives)
 # ---------------------------
@@ -1149,7 +1159,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 # safety — if missing exchange, qualify automatically
                 if not getattr(c, "exchange", None):
                     try:
-                        qc = IB_INSTANCE.qualifyContractsAsync(c)
+                        qc = qualify_contract(c)
                         if qc:
                             c = qc[0]
                     except:
@@ -1279,7 +1289,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             c.conId = conId
 
             try:
-                qc = IB_INSTANCE.qualifyContractsAsync(c)
+                qc = qualify_contract(c)
                 if qc:
                     c = qc[0]   # fully qualified contract
             except Exception as e:
@@ -1439,7 +1449,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         contract = build_contract(sig)
         #logger.info(f"{contract}")
         # Qualify contract and detect ambiguity
-        qualified = IB_INSTANCE.qualifyContractsAsync(contract)
+        qualified = qualify_contract(contract)
         # qualified = True
         # logger.info(f"two")
         # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
