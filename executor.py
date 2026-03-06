@@ -886,39 +886,40 @@ def _round_to_tick(price: float, tick: float) -> float:
 
 
 def get_min_tick(IB_INSTANCE, contract: Contract) -> float:
-    """
-    Get ContractDetails.minTick for this contract, cached.
-    Requires contract to be qualified (conId known) or at least localSymbol stable.
-    """
+
     key = None
-    try:
-        cid = getattr(contract, "conId", None)
-        if cid:
-            key = f"conId:{cid}"
-    except Exception:
-        pass
-    if not key:
+    cid = getattr(contract, "conId", None)
+    if cid:
+        key = f"conId:{cid}"
+    else:
         key = f"localSymbol:{getattr(contract, 'localSymbol', '')}"
 
     with _MIN_TICK_LOCK:
         if key in _MIN_TICK_CACHE:
             return _MIN_TICK_CACHE[key]
 
-    # Ask IB for ContractDetails
     try:
-        details = contract.ContractDetails(contract)
-        #IB_INSTANCE.waitOnUpdate(timeout=2)
+
+        async def _req():
+            return await IB_INSTANCE.reqContractDetailsAsync(contract)
+
+        future = asyncio.run_coroutine_threadsafe(_req(), IB_LOOP)
+        details = future.result(timeout=5)
+
         if not details:
             raise RuntimeError("reqContractDetails returned empty")
+
         mt = float(details[0].minTick)
+
     except Exception as e:
         log_step(f"[ALARM] MIN_TICK_FAIL: using fallback 0.01 err={e}")
-        mt = 0.01  # fallback so we don't crash; futures will still likely reject if wrong
+        mt = 0.01
 
     with _MIN_TICK_LOCK:
         _MIN_TICK_CACHE[key] = mt
 
     log_step(f"MIN_TICK: {mt}")
+
     return mt
 
 
