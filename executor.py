@@ -869,7 +869,7 @@ def get_min_tick(contract):
 
     if not details:
         raise RuntimeError("reqContractDetails returned empty")
-
+    log_step("min tick fetched")
     return float(details[0].minTick)
 
 
