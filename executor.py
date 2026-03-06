@@ -141,6 +141,7 @@ logger.propagate = False
 IB_LOCK = threading.Lock()
 IB_INSTANCE: IB | None = None
 IB_READY = threading.Event()
+IB_LOOP = None
 import signal
 import sys
 import atexit
@@ -188,14 +189,14 @@ async def ib_connect_persistent():
 
 def start_ib():
     logger.info("[IB] starting async connection thread")
-    loop = asyncio.new_event_loop()
-
+    global IB_LOOP
+    IB_LOOP = asyncio.new_event_loop()
     def runner():
-        asyncio.set_event_loop(loop)
+        asyncio.set_event_loop(IB_LOOP)
     
         try:
-            loop.run_until_complete(ib_connect_persistent())
-            loop.run_forever()
+            IB_LOOP.run_until_complete(ib_connect_persistent())
+            IB_LOOP.run_forever()
         except Exception as e:
             logger.error(f"[IB] connection failed: {e}")
 
@@ -1024,7 +1025,7 @@ def qualify_contract(contract):
 
     future = asyncio.run_coroutine_threadsafe(
         _qualify(),
-        IB_INSTANCE.loop
+        IB_LOOP
     )
 
     return future.result(timeout=5)
