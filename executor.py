@@ -803,7 +803,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     try:
         order = MarketOrder(action, abs(int(qty)))
-        trade = IB_INSTANCE.placeOrder(contract, order)
+        trade = run_ib(ib_place_order(contract, order))
     
         timeout = time.time() + 5
         fill_price = None
