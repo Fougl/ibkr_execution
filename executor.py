@@ -775,8 +775,11 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         order = MarketOrder(action, abs(int(qty)))
         trade = IB_INSTANCE.placeOrder(contract, order)
     
+        async def _wait_fill(trade):
+            await asyncio.wait_for(trade.filledEvent, timeout=5)
+        
         future = asyncio.run_coroutine_threadsafe(
-            asyncio.wait_for(trade.filledEvent, timeout=5),
+            _wait_fill(trade),
             IB_INSTANCE.loop
         )
     
@@ -898,8 +901,11 @@ def open_position_with_brackets(IB_INSTANCE,
     timeout = time.time() + 10
 
     try:
+        async def _wait_fill(trade):
+            await asyncio.wait_for(trade.filledEvent, timeout=5)
+        
         future = asyncio.run_coroutine_threadsafe(
-            asyncio.wait_for(trade.filledEvent, timeout=5),
+            _wait_fill(trade),
             IB_INSTANCE.loop
         )
     
