@@ -861,7 +861,7 @@ def _round_to_tick(price: float, tick: float) -> float:
 
 def get_min_tick(contract):
 
-    details = IB_INSTANCE.reqContractDetails(contract)
+    details = contract.ContractDetails(contract)
 
     if not details:
         raise RuntimeError("reqContractDetails returned empty")
