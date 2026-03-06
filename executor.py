@@ -1127,7 +1127,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 # safety — if missing exchange, qualify automatically
                 if not getattr(c, "exchange", None):
                     try:
-                        qc = IB_INSTANCE.qualifyContracts(c)
+                        qc = IB_INSTANCE.qualifyContractsAsync(c)
                         if qc:
                             c = qc[0]
                     except:
@@ -1257,7 +1257,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             c.conId = conId
 
             try:
-                qc = IB_INSTANCE.qualifyContracts(c)
+                qc = IB_INSTANCE.qualifyContractsAsync(c)
                 if qc:
                     c = qc[0]   # fully qualified contract
             except Exception as e:
@@ -1417,7 +1417,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         contract = build_contract(sig)
         #logger.info(f"{contract}")
         # Qualify contract and detect ambiguity
-        qualified = IB_INSTANCE.qualifyContracts(contract)
+        qualified = IB_INSTANCE.qualifyContractsAsync(contract)
         # qualified = True
         # logger.info(f"two")
         # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
