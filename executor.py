@@ -1004,14 +1004,21 @@ def open_position_with_brackets(IB_INSTANCE,
                     fill_price = trade.fills[-1].execution.price
                 break
         
-            time.sleep(0.05)
+            #time.sleep(0.05)
         
-        if not fill_price:
-            raise RuntimeError("fill_timeout")
+        # if not fill_price:
+        #     raise RuntimeError("fill_timeout")
 
 
     except Exception:
-        raise RuntimeError("fill_timeout")
+        log_step("[ALARM] FILL_FAIL: parent not filled")
+        log_trade_event({"trade": "fail", "reason": "fill_timeout", "fill_price": None})
+        return {
+            "ok": True,                         # <-- critical
+            "action": "fill_timeout_no_entry",
+            "reason": "market_not_filling",
+            "executed": False
+        }
     log_step(
         f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     if not fill_price:
