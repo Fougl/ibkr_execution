@@ -856,8 +856,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         f"conId={getattr(contract,'conId',None)} "
         f"ltm={getattr(contract,'lastTradeDateOrContractMonth',None)!r}"
     )
-    log_step(
-        f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+    
     try:
         order = MarketOrder(action, abs(int(qty)))
         trade = run_ib(ib_place_order(contract, order))
@@ -877,6 +876,8 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
             raise RuntimeError("fill_timeout")
 
         log_trade_event({"trade": "success", "fill_price": fill_price, "action": "close"})
+        log_step(
+        f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         log_step("CLOSE_POSITION_SUCCESS")
         return
 

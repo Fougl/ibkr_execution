@@ -989,7 +989,7 @@ def add_cloudwatch_log_config(broker: str, short_name: str) -> None:
         "log_group_name": "executor",
         "log_stream_name": f"{broker}/{short_name}/trades",
         "timezone": "UTC",
-        "multi_line_start_pattern": "^\\{"
+        "multi_line_start_pattern": "^\\{alert"
     }
 
     try:
