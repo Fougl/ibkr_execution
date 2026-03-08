@@ -972,7 +972,7 @@ def open_position_with_brackets(IB_INSTANCE,
                                 take_profit: float | None,
                                 stop_loss: float | None,
                                 target_percentage: float | None,
-                                tp_sl_are_multipliers: bool = True
+                                tp_sl_are_multipliers: bool = False
                                 ) -> None:
 
     if take_profit is None or stop_loss is None:
@@ -1833,7 +1833,6 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                                              sig.take_profit,
                                              sig.stop_loss,
                                              sig.target_percentage,
-                                             ACCOUNT_SHORT_NAME    # <<< NEW
                                              )
 
             if isinstance(op, dict) and not op.get("executed", False):
@@ -1898,8 +1897,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                                              desired_qty,
                                              sig.take_profit,
                                              sig.stop_loss,
-                                             sig.target_percentage,
-                                             ACCOUNT_SHORT_NAME    # <<< NEW
+                                             sig.target_percentage
                                              )
 
             if isinstance(op, dict) and not op.get("executed", False):
@@ -1946,7 +1944,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
 
 def background_scheduler_loop():
-    IB_INSTANCE = None
+    global IB_INSTANCE
     """
     Market-aware scheduler:
       - Runs ensure_preclose_close_if_needed() once per market day
