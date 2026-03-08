@@ -714,12 +714,7 @@ WantedBy=multi-user.target
 
     subprocess.run(["systemctl", "daemon-reload"], check=False)
     subprocess.run(["systemctl", "enable", unit_name], check=False)
-
-    # First-time start
-    subprocess.run(["systemctl", "start", unit_name], check=False)
-    return
-
-    # If service exists → ALWAYS restart it
+    # Restart so running executor picks up unit changes (e.g. EXECUTOR_TRADES_LOG_PATH)
     subprocess.run(["systemctl", "restart", unit_name], check=False)
 
     
