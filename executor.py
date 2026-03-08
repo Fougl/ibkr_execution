@@ -254,6 +254,25 @@ async def ib_place_order(contract, order):
     return IB_INSTANCE.placeOrder(contract, order)
 
 
+async def _ib_cancel_all_open_orders(symbol=None, contract=None):
+    """Runs on IB_LOOP: fetch open trades, filter, cancel each. Returns count of trades considered."""
+    trades = IB_INSTANCE.openTrades()
+    for t in trades:
+        o = getattr(t, "order", None)
+        if not o:
+            continue
+        c = t.contract
+        if contract is not None:
+            if getattr(c, "conId", None) != getattr(contract, "conId", None):
+                continue
+        elif symbol is not None:
+            if getattr(c, "localSymbol", None) != symbol and getattr(c, "symbol", None) != symbol:
+                continue
+        if not t.isDone():
+            IB_INSTANCE.cancelOrder(o)
+    return len(trades)
+
+
 def disconnect_ib(ib: IB):
     try:
         if ib and ib.isConnected():
@@ -793,37 +812,15 @@ def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
     log_step(f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
-        trades = IB_INSTANCE.openTrades()
+        count = run_ib(_ib_cancel_all_open_orders(symbol=symbol, contract=contract), timeout=15)
     except Exception as e:
-        log_step("[ALARM] Error fetching open trades.")
-        raise RuntimeError("openTrades failed")
+        log_step(f"[ALARM] Error cancelling order: {e}")
+        raise RuntimeError("openTrades/cancelOrder failed") from e
 
-    if not trades:
+    if count == 0:
         log_step("CANCEL_OPEN_ORDERS: NONE")
-        return
-
-    for t in trades:
-        try:
-            o = getattr(t, "order", None)
-            if not o:
-                continue
-            c = t.contract
-
-            if contract is not None:
-                if getattr(c, "conId", None) != getattr(contract, "conId", None):
-                    continue
-            elif symbol is not None:
-                if getattr(c, "localSymbol", None) != symbol and getattr(c, "symbol", None) != symbol:
-                    continue
-
-            if not t.isDone():
-                IB_INSTANCE.cancelOrder(o)
-
-        except Exception as e:
-            log_step(f"[ALARM] Error cancelling order: {e}")
-            raise
-
-    log_step("CANCEL_OPEN_ORDERS: DONE")
+    else:
+        log_step("CANCEL_OPEN_ORDERS: DONE")
 
 
 def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
