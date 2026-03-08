@@ -1943,25 +1943,41 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         flush_account_log("WEBHOOK_EXEC")
 
 
+def _effective_market_settings(settings: Settings) -> Optional[Settings]:
+    """If settings.market_open is None, try to get open/close/timezone from IB contract details. Otherwise use settings."""
+    if settings.market_open:
+        return settings
+    ib_open, ib_close, ib_tz = get_market_hours_from_ib()
+    if ib_open and ib_close and ib_tz:
+        return Settings(
+            delay_sec=settings.delay_sec,
+            execution_delay=settings.execution_delay,
+            pre_close_min=settings.pre_close_min,
+            post_open_min=settings.post_open_min,
+            market_open=ib_open,
+            market_close=ib_close,
+            timezone=ib_tz,
+        )
+    return None
+
+
 def background_scheduler_loop():
     global IB_INSTANCE
     """
-    Market-aware scheduler:
-      - Runs ensure_preclose_close_if_needed() once per market day
-      - Runs ensure_postopen_reopen_if_needed() once per market day
-      - Automatically detects new market day by comparing open_dt dates
+    If SSM market_open is None, uses IB contract details (liquidHours/tradingHours, timeZoneId) for open/close/tz.
+    Runs rebuild_market_timeline only when market open is set (from SSM or IB), inside the loop.
+    Runs ensure_preclose_close_if_needed() and ensure_postopen_reopen_if_needed() once per market day.
     """
-    #logger.info("Background scheduler thread started.")
-
-    last_preclose_run_day = None   # date of market_open for the last run
-    last_postopen_run_day = None   # date of market_open for the last run
-    settings = settings_cache.get()
-    rebuild_market_timeline(settings)
     while True:
-        #logger.info("Background scheduler thread started.")
         try:
             settings = settings_cache.get()
-            now_local = now_in_market_tz(settings)
+            effective = _effective_market_settings(settings)
+            if not effective:
+                time.sleep(20)
+                continue
+            rebuild_market_timeline(effective)
+            now_local = now_in_market_tz(effective)
+
             #rebuild_market_timeline(settings)
 
             # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
@@ -1976,6 +1992,90 @@ def background_scheduler_loop():
             #     f"last_postopen_run_day={last_postopen_run_day}"
             # )
             # This defines the “trading day” — the day the market opens.
+            # market_day = open_dt.date()
+
+            # 🚨 RESET LOGIC
+            # If the market_day changed since last loop iteration => new trading day
+            # if last_preclose_run_day != market_day:
+            #     last_preclose_run_day = None
+            # if last_postopen_run_day != market_day:
+            #     last_postopen_run_day = None
+
+            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+            #     now_local, settings)
+            # logger.info(
+            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
+            #     f"open_dt={open_dt.isoformat()} | "
+            #     f"close_dt={close_dt.isoformat()} | "
+            #     f"preclose_dt={preclose_dt.isoformat()} | "
+            #     f"reopen_dt={reopen_dt.isoformat()} | "
+            #     f"last_preclose_run_day={last_preclose_run_day} | "
+            #     f"last_postopen_run_day={last_postopen_run_day}"
+            # )
+            # This defines the “trading day” — the day the market opens.
+            # market_day = open_dt.date()
+
+            # 🚨 RESET LOGIC
+            # If the market_day changed since last loop iteration => new trading day
+            # if last_preclose_run_day != market_day:
+            #     last_preclose_run_day = None
+            # if last_postopen_run_day != market_day:
+            #     last_postopen_run_day = None
+
+            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+            #     now_local, settings)
+            # logger.info(
+            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
+            #     f"open_dt={open_dt.isoformat()} | "
+            #     f"close_dt={close_dt.isoformat()} | "
+            #     f"preclose_dt={preclose_dt.isoformat()} | "
+            #     f"reopen_dt={reopen_dt.isoformat()} | "
+            #     f"last_preclose_run_day={last_preclose_run_day} | "
+            #     f"last_postopen_run_day={last_postopen_run_day}"
+            # )
+            # This defines the “trading day” — the day the market opens.
+            # market_day = open_dt.date()
+
+            # 🚨 RESET LOGIC
+            # If the market_day changed since last loop iteration => new trading day
+            # if last_preclose_run_day != market_day:
+            #     last_preclose_run_day = None
+            # if last_postopen_run_day != market_day:
+            #     last_postopen_run_day = None
+
+            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+            # logger.info(
+            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
+            #     f"open_dt={open_dt.isoformat()} | "
+            #     f"close_dt={close_dt.isoformat()} | "
+            #     f"preclose_dt={preclose_dt.isoformat()} | "
+            #     f"reopen_dt={reopen_dt.isoformat()} | "
+            #     f"last_preclose_run_day={last_preclose_run_day} | "
+            #     f"last_postopen_run_day={last_postopen_run_day}"
+            # )
+            #rebuild_market_timeline(settings)
+
+            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
+            #     now_local, settings)
+            # logger.info(
+            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
+            #     f"open_dt={open_dt.isoformat()} | "
+            #     f"close_dt={close_dt.isoformat()} | "
+            #     f"preclose_dt={preclose_dt.isoformat()} | "
+            #     f"reopen_dt={reopen_dt.isoformat()} | "
+            #     f"last_preclose_run_day={last_preclose_run_day} | "
+            #     f"last_postopen_run_day={last_postopen_run_day}"
+            # )
+            # This defines the “trading day” — the day the market opens.
+            # market_day = open_dt.date()
+
+            # 🚨 RESET LOGIC
+            # If the market_day changed since last loop iteration => new trading day
+            # if last_preclose_run_day != market_day:
+            #     last_preclose_run_day = None
+            # if last_postopen_run_day != market_day:
+            #     last_postopen_run_day = None
+
             # market_day = open_dt.date()
 
             # 🚨 RESET LOGIC
