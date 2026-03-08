@@ -66,6 +66,7 @@ from decimal import Decimal, ROUND_HALF_UP
 # Config (ENV)
 # ---------------------------
 LOG_PATH = os.getenv("EXECUTOR_LOG_PATH", "/opt/ibc/execution/executor.log")
+TRADES_LOG_PATH = os.getenv("EXECUTOR_TRADES_LOG_PATH", "")
 STATE_PATH = os.getenv("EXECUTOR_STATE_PATH",
                        "/opt/ibc/execution/executor_state.json")
 DERIVED_ID = int(os.getenv("DERIVED_ID"))
@@ -267,6 +268,22 @@ def flush_account_log(header: str):
 
     finally:
         _account_logs[ACCOUNT_SHORT_NAME] = []
+
+
+def log_trade_event(obj: Dict[str, Any]) -> None:
+    """
+    Append one JSON line to the account's trades log (executor-{broker}-{short_name}-trades.log).
+    Each line starts with '{' so CloudWatch multiline groups one event per line.
+    """
+    if not TRADES_LOG_PATH:
+        return
+    try:
+        os.makedirs(os.path.dirname(TRADES_LOG_PATH), exist_ok=True)
+        with open(TRADES_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+            f.flush()
+    except Exception as e:
+        logger.warning("Failed to write trades log: %s", e)
 
 
 # ---------------------------
@@ -837,17 +854,21 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         
         if not fill_price:
             raise RuntimeError("fill_timeout")
-    
+
+        log_trade_event({"trade": "success", "fill_price": fill_price, "action": "close"})
         log_step("CLOSE_POSITION_SUCCESS")
         return
-    
+
     except Exception as e:
         if "TimeoutError" in str(e):
             log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
+            log_trade_event({"trade": "fail", "reason": "close_fill_timeout", "fill_price": None})
         else:
             log_step(f"CLOSE_POSITION_FAIL: error={e}")
-            raise
+            log_trade_event({"trade": "fail", "reason": str(e), "fill_price": None})
+        raise
     log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
+    log_trade_event({"trade": "fail", "reason": "close_fill_timeout", "fill_price": None})
     raise RuntimeError("close_position_fill_timeout")
     # # More robust wait loop: IB updates positions asynchronously
     # for i in range(15):      # ~15 seconds worst-case
@@ -979,6 +1000,7 @@ def open_position_with_brackets(IB_INSTANCE,
         f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
     if not fill_price:
         log_step("[ALARM] FILL_FAIL: parent not filled")
+        log_trade_event({"trade": "fail", "reason": "fill_timeout", "fill_price": None})
         return {
             "ok": True,                         # <-- critical
             "action": "fill_timeout_no_entry",
@@ -1026,6 +1048,8 @@ def open_position_with_brackets(IB_INSTANCE,
     run_ib(ib_place_order(contract, tp_order))
     run_ib(ib_place_order(contract, sl_order))
 
+    # Trades log: confirmation with fill price
+    log_trade_event({"trade": "success", "fill_price": fill_price, "action": "open"})
 
     #log_step("BRACKET_CHILDREN_SUBMITTED")
     log_step(f"PositionsAfter: {len(IB_INSTANCE.positions())}")
@@ -2020,6 +2044,9 @@ def webhook() -> Any:
         payload = request.get_json(force=True, silent=False) or {}
     except Exception:
         payload = {}
+
+    # Trades log: whole webhook as single JSON line (multiline start with {)
+    log_trade_event(payload)
 
     try:
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")

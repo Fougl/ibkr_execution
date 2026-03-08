@@ -695,6 +695,7 @@ Type=simple
 User=root
 WorkingDirectory=/opt/ibc/execution
 Environment=EXECUTOR_LOG_PATH=/opt/ibc/execution/executor-{broker}-{short_name}.log
+Environment=EXECUTOR_TRADES_LOG_PATH=/opt/ibc/execution/executor-{broker}-{short_name}-trades.log
 Environment=EXECUTOR_STATE_PATH=/opt/ibc/execution/state-{broker}-{short_name}.json
 Environment=DERIVED_ID={derived_id}
 Environment=ACCOUNT_SHORT_NAME={short_name}
@@ -702,7 +703,7 @@ Environment=EXECUTOR_PORT={executor_port}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/bin/bash /opt/ibc/execution/run_ex.sh
 Restart=always
-RestartSec=3
+RestartSec=6
 KillSignal=SIGTERM
 
 [Install]
@@ -964,7 +965,7 @@ def webhook_broker_account(broker: str, short_name: str):
     
 def add_cloudwatch_log_config(broker: str, short_name: str) -> None:
     """
-    Appends a new executor log entry into amazon-cloudwatch-agent.json
+    Appends executor log entries (main + trades) into amazon-cloudwatch-agent.json
     and restarts the CloudWatch agent.
     """
     cfg_path = "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
@@ -976,24 +977,36 @@ def add_cloudwatch_log_config(broker: str, short_name: str) -> None:
         logger.exception("Cannot read CloudWatch agent config")
         return
 
-    entry = {
+    main_entry = {
         "file_path": f"/opt/ibc/execution/executor-{broker}-{short_name}.log",
         "log_group_name": "executor",
         "log_stream_name": f"{broker}/{short_name}",
         "timezone": "UTC",
         "multi_line_start_pattern": "=== (HTTP|STARTING|WEBHOOK_EXEC|PRECLOSE_EXEC|POSTOPEN_EXEC)"
     }
+    trades_entry = {
+        "file_path": f"/opt/ibc/execution/executor-{broker}-{short_name}-trades.log",
+        "log_group_name": "executor",
+        "log_stream_name": f"{broker}/{short_name}/trades",
+        "timezone": "UTC",
+        "multi_line_start_pattern": "^\\{"
+    }
 
     try:
         collect = cfg["logs"]["logs_collected"]["files"]["collect_list"]
+        main_stream = f"{broker}/{short_name}"
+        trades_stream = f"{broker}/{short_name}/trades"
+        has_main = any(c.get("log_stream_name") == main_stream for c in collect)
+        has_trades = any(c.get("log_stream_name") == trades_stream for c in collect)
 
-        # Avoid duplicates
-        for c in collect:
-            if c.get("log_stream_name") == f"{broker}/{short_name}":
-                logger.info("CloudWatch entry already exists for %s/%s", broker, short_name)
-                return
+        if has_main and has_trades:
+            logger.info("CloudWatch entries already exist for %s/%s", broker, short_name)
+            return
 
-        collect.append(entry)
+        if not has_main:
+            collect.append(main_entry)
+        if not has_trades:
+            collect.append(trades_entry)
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
