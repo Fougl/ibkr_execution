@@ -187,14 +187,15 @@ atexit.register(shutdown_handler)
 
 async def ib_connect_persistent():
     """
-    Connect to IB gateway. Retries until connected so executor can start
-    before the gateway has finished logging in.
+    Connect to IB gateway. Retries until connected or 2 minutes have elapsed.
     """
     global IB_INSTANCE
 
     port = 4002 + DERIVED_ID
     cid = 1 + DERIVED_ID
     attempt = 0
+    start_time = time.time()
+    connect_timeout_sec = 120  # 2 minutes
 
     while True:
         attempt += 1
@@ -216,6 +217,13 @@ async def ib_connect_persistent():
                     ib.disconnect()
             except Exception:
                 pass
+            elapsed = time.time() - start_time
+            if elapsed >= connect_timeout_sec:
+                logger.info(
+                    "[ALARM] IB still not connected after %.0f seconds (%d attempts); stopping connect retries",
+                    elapsed, attempt
+                )
+                return
             logger.warning(
                 "[IB] connection attempt %d failed (gateway may still be starting): %s",
                 attempt, e
