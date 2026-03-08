@@ -186,25 +186,41 @@ atexit.register(shutdown_handler)
 
 
 async def ib_connect_persistent():
-
+    """
+    Connect to IB gateway. Retries until connected so executor can start
+    before the gateway has finished logging in.
+    """
     global IB_INSTANCE
-
-    ib = IB()
 
     port = 4002 + DERIVED_ID
     cid = 1 + DERIVED_ID
+    attempt = 0
 
-    await ib.connectAsync(
-        "127.0.0.1",
-        port,
-        clientId=cid,
-        timeout=5
-    )
-
-    IB_INSTANCE = ib
-    IB_READY.set()
-
-    logger.info("[IB] Persistent async connection established")
+    while True:
+        attempt += 1
+        ib = IB()
+        try:
+            await ib.connectAsync(
+                "127.0.0.1",
+                port,
+                clientId=cid,
+                timeout=5
+            )
+            IB_INSTANCE = ib
+            IB_READY.set()
+            logger.info("[IB] Persistent async connection established (attempt %d)", attempt)
+            return
+        except Exception as e:
+            try:
+                if ib.isConnected():
+                    ib.disconnect()
+            except Exception:
+                pass
+            logger.warning(
+                "[IB] connection attempt %d failed (gateway may still be starting): %s",
+                attempt, e
+            )
+            await asyncio.sleep(10)
 
 
 def start_ib():
