@@ -984,12 +984,14 @@ def add_cloudwatch_log_config(broker: str, short_name: str) -> None:
         "timezone": "UTC",
         "multi_line_start_pattern": "=== (HTTP|STARTING|WEBHOOK_EXEC|PRECLOSE_EXEC|POSTOPEN_EXEC)"
     }
+    # Only lines starting with {"alert" start a new event; {"trade" lines stay under the alert
+    trades_multiline_pattern = '^\\{\"alert\"'
     trades_entry = {
         "file_path": f"/opt/ibc/execution/executor-{broker}-{short_name}-trades.log",
         "log_group_name": "executor",
         "log_stream_name": f"{broker}/{short_name}/trades",
         "timezone": "UTC",
-        "multi_line_start_pattern": "^\\\\{\\\"alert\\\""
+        "multi_line_start_pattern": trades_multiline_pattern
     }
 
     try:
@@ -999,19 +1001,30 @@ def add_cloudwatch_log_config(broker: str, short_name: str) -> None:
         has_main = any(c.get("log_stream_name") == main_stream for c in collect)
         has_trades = any(c.get("log_stream_name") == trades_stream for c in collect)
 
-        if has_main and has_trades:
-            logger.info("CloudWatch entries already exist for %s/%s", broker, short_name)
-            return
-
+        changed = False
         if not has_main:
             collect.append(main_entry)
+            changed = True
         if not has_trades:
             collect.append(trades_entry)
+            changed = True
+        else:
+            # Update existing trades entry so multiline pattern groups {"trade"} under {"alert"}
+            for c in collect:
+                if c.get("log_stream_name") == trades_stream:
+                    if c.get("multi_line_start_pattern") != trades_multiline_pattern:
+                        c["multi_line_start_pattern"] = trades_multiline_pattern
+                        changed = True
+                    break
+
+        if not changed:
+            logger.info("CloudWatch entries already exist for %s/%s (no change)", broker, short_name)
+            return
 
         with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
 
-        logger.warning("Added CloudWatch log entry for %s/%s — restarting agent", broker, short_name)
+        logger.warning("Updated CloudWatch log config for %s/%s — restarting agent", broker, short_name)
         subprocess.run(["systemctl", "restart", "amazon-cloudwatch-agent"], check=False)
 
     except Exception:
