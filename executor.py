@@ -1891,7 +1891,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
             # Fresh entry → open position
             # time.sleep(max(0, int(settings.execution_delay)))
-             log_step(
+            log_step(
             f"Calling open position: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
             op = open_position_with_brackets(IB_INSTANCE,
                                              contract,
