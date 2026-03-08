@@ -224,7 +224,7 @@ async def ib_connect_persistent():
                     elapsed, attempt
                 )
                 return
-            logger.warning(
+            logger.info(
                 "[IB] connection attempt %d failed (gateway may still be starting): %s",
                 attempt, e
             )
