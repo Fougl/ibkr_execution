@@ -1098,19 +1098,23 @@ def open_position_with_brackets(IB_INSTANCE,
     # ------------------------------------------------
     # 3️⃣ CALCULATE TP / SL FROM REAL FILL
     # ------------------------------------------------
-    tp_pct = float(take_profit) / 100.0
-    sl_pct = float(stop_loss) / 100.0
+    if not tp_sl_are_multipliers:
+        tp_pct = float(take_profit) / 100.0
+        sl_pct = float(stop_loss) / 100.0
 
-    if direction > 0:
-        tp_price = fill_price * (1 + tp_pct)
-        sl_price = fill_price * (1 - sl_pct)
+        if direction > 0:
+            tp_price = fill_price * (1 + tp_pct)
+            sl_price = fill_price * (1 - sl_pct)
+        else:
+            tp_price = fill_price * (1 - tp_pct)
+            sl_price = fill_price * (1 + sl_pct)
+
+        tick = get_min_tick(IB_INSTANCE, contract)
+        tp_price = _round_to_tick(tp_price, tick)
+        sl_price = _round_to_tick(sl_price, tick)
     else:
-        tp_price = fill_price * (1 - tp_pct)
-        sl_price = fill_price * (1 + sl_pct)
-
-    tick = get_min_tick(IB_INSTANCE, contract)
-    tp_price = _round_to_tick(tp_price, tick)
-    sl_price = _round_to_tick(sl_price, tick)
+        tp_price=take_profit
+        sl_price=stop_loss
 
     log_step(f"TP_PRICE: {tp_price}")
     log_step(f"SL_PRICE: {sl_price}")
@@ -1482,7 +1486,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                                         take_profit=tp_price,
                                         stop_loss=sl_price,
                                         target_percentage=None,
-                                        tp_sl_are_multipliers=False,
+                                        tp_sl_are_multipliers=True,
                                         trade_reason="postopen reopening"
                                         )
 
