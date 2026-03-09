@@ -263,7 +263,7 @@ def ib_connection_watchdog():
 
             if connected:
                 if last_logged_state is not True:
-                    logger.info("[IB] connection healthy")
+                    #logger.info("[IB] connection healthy")
                     last_logged_state = True
             else:
                 if last_logged_state is not False:
