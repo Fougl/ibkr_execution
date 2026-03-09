@@ -251,27 +251,28 @@ def run_ib(coro, timeout=10):
     return future.result(timeout=timeout)
 
 def ib_connection_watchdog():
-    global IB_INSTANCE
+    last_logged_state = None
 
     while True:
         try:
-            if IB_INSTANCE is None:
-                logger.error("[ALARM] IB_INSTANCE is None")
-                time.sleep(5)
-                continue
+            connected = (
+                IB_INSTANCE is not None
+                and IB_READY.is_set()
+                and IB_INSTANCE.isConnected()
+            )
 
-            if not IB_INSTANCE.isConnected():
-                logger.error("[ALARM] IB disconnected")
-
+            if connected:
+                if last_logged_state is not True:
+                    logger.info("[IB] connection healthy")
+                    last_logged_state = True
             else:
-                # optional heartbeat test
-                try:
-                    run_ib(IB_INSTANCE.reqCurrentTimeAsync(), timeout=3)
-                except Exception:
-                    logger.error("[ALARM] IB heartbeat failed")
+                if last_logged_state is not False:
+                    logger.error("[ALARM] IB disconnected")
+                    last_logged_state = False
 
         except Exception as e:
             logger.error(f"[ALARM] IB watchdog error: {e}")
+            last_logged_state = "error"
 
         time.sleep(5)
 
