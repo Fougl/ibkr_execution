@@ -1107,9 +1107,9 @@ def open_position_with_brackets(IB_INSTANCE,
     #log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
     log_step(f"PositionsAfter: {pos}")
     log_step(f"OrdersAfter:    {orders}")
-    if len(pos) == 0:
+    if pos == 0:
         log_step("[ALARM] No positions were opened")
-    if len(orders) == 0:
+    if rders == 0:
         log_step("[ALARM] No orders were opened")
 
 
@@ -1770,8 +1770,8 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
             log_step(
                 "[EXEC] Same direction position already opened. Skipping execution")
-            pos=len(IB_INSTANCE.positions())
-            orders=len(IB_INSTANCE.openTrades())
+            # pos=len(IB_INSTANCE.positions())
+            # orders=len(IB_INSTANCE.openTrades())
             #log_trade_event({"event": "same_position_already_open_skipping", "positions_already_opened": pos, "orders_alreay_opened": orders})
             result.update(
                 {"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
