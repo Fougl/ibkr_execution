@@ -812,15 +812,34 @@ def cancel_all_open_orders(IB_INSTANCE, reason="", symbol=None, contract=None):
     log_step(f"CANCEL_OPEN_ORDERS reason={reason}")
 
     try:
-        count = run_ib(_ib_cancel_all_open_orders(symbol=symbol, contract=contract), timeout=15)
+        run_ib(_ib_cancel_all_open_orders(symbol=symbol, contract=contract), timeout=15)
     except Exception as e:
         log_step(f"[ALARM] Error cancelling order: {e}")
         raise RuntimeError("openTrades/cancelOrder failed") from e
 
-    if count == 0:
-        log_step("CANCEL_OPEN_ORDERS: NONE")
-    else:
-        log_step("CANCEL_OPEN_ORDERS: DONE")
+    # WAIT UNTIL ORDERS ACTUALLY DISAPPEAR
+    timeout = time.time() + 5
+
+    while time.time() < timeout:
+
+        trades = IB_INSTANCE.openTrades()
+
+        filtered = []
+        for t in trades:
+            try:
+                c = t.contract
+                if contract and c.conId != contract.conId:
+                    continue
+                filtered.append(t)
+            except:
+                continue
+
+        if not filtered:
+            log_step("CANCEL_OPEN_ORDERS: DONE")
+            return
+
+
+    log_step("[ALARM] CANCEL_OPEN_ORDERS timeout waiting for cancel")
 
 
 def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
@@ -2258,7 +2277,7 @@ def webhook() -> Any:
             result = execute_signal_for_account(IB_INSTANCE, sig, settings)
             pos=len(IB_INSTANCE.positions())
             orders=len(IB_INSTANCE.openOrders())
-            log_trade_event({"positions_after_webhook_execution": pos, "orders_after_trade_execution": orders})
+            log_trade_event({"positions_after_webhook_execution": pos, "orders_after_webhook_execution": orders})
         return jsonify({"ok": result["ok"], "result": result}), 200
 
     except Exception as e:
