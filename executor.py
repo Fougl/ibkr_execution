@@ -261,6 +261,15 @@ def ib_connection_watchdog():
                 and IB_INSTANCE.isConnected()
             )
 
+            now = time.time()
+
+            # ---- ignore alarms during startup grace period ----
+            if now - EXECUTOR_START_TIME < 120:
+                last_logged_state = connected
+                time.sleep(5)
+                continue
+            # ---------------------------------------------------
+
             if connected:
                 if last_logged_state is not True:
                     #logger.info("[IB] connection healthy")
