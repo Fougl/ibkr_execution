@@ -250,6 +250,31 @@ def run_ib(coro, timeout=10):
     future = asyncio.run_coroutine_threadsafe(coro, IB_LOOP)
     return future.result(timeout=timeout)
 
+def ib_connection_watchdog():
+    global IB_INSTANCE
+
+    while True:
+        try:
+            if IB_INSTANCE is None:
+                logger.error("[ALARM] IB_INSTANCE is None")
+                time.sleep(5)
+                continue
+
+            if not IB_INSTANCE.isConnected():
+                logger.error("[ALARM] IB disconnected")
+
+            else:
+                # optional heartbeat test
+                try:
+                    run_ib(IB_INSTANCE.reqCurrentTimeAsync(), timeout=3)
+                except Exception:
+                    logger.error("[ALARM] IB heartbeat failed")
+
+        except Exception as e:
+            logger.error(f"[ALARM] IB watchdog error: {e}")
+
+        time.sleep(5)
+
 async def ib_place_order(contract, order):
     return IB_INSTANCE.placeOrder(contract, order)
 
@@ -2178,6 +2203,11 @@ start_scheduler()
 #     t.start()
     
 start_ib()
+
+threading.Thread(
+    target=ib_connection_watchdog,
+    daemon=True
+).start()
 # start_ib_connection()
 # ---------------------------
 # Flask app
