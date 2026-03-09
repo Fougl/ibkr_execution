@@ -1508,7 +1508,7 @@ def parse_timestamp(value) -> float | None:
 # ---------------------------
 
 
-def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> Dict[str, Any]:
+def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, contract: Contract) -> Dict[str, Any]:
 
     # if not IB_INSTANCE.isConnected():
     #     log_step( "IB_NOT_CONNECTED")
@@ -1552,38 +1552,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
     try:
 
         #logger.info(f"{IB_INSTANCE.positions()}")
-        contract = build_contract(sig)
-        #logger.info(f"{contract}")
-        # Qualify contract and detect ambiguity
-        qualified = qualify_contract(contract)
-        # qualified = True
-        # logger.info(f"two")
-        # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
-
-        # If 0 or more than 1 contract returned → ambiguous
-        if not qualified or len(qualified) != 1:
-            log_step(
-                f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
-                f"qualified_count={len(qualified)}"
-            )
-            # logger.info(
-            #     f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
-            #     f"qualified_count={len(qualified)}"
-            # )
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
-            result.update({
-                "ok": True,
-                "action": "skipped_ambiguous_contract",                # INFO: early return
-
-                "reason": "ambiguous_contract",
-                "qualified_count": len(qualified)
-            })
-            flush_account_log("WEBHOOK_EXEC")
-            return result
+        
 
         # Use the resolved contract
-        contract = qualified[0]
+        # contract = qualified[0]
 
         qty = current_position_qty(IB_INSTANCE, contract)
         # logger.info(f"two")
@@ -2274,10 +2246,47 @@ def webhook() -> Any:
             logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
             return jsonify({"ok": False, "error": "ib_not_connected"}), 503
         with IB_LOCK:
-            result = execute_signal_for_account(IB_INSTANCE, sig, settings)
-            pos=len(IB_INSTANCE.positions())
-            orders=len(IB_INSTANCE.openOrders())
-            log_trade_event({"positions_after_webhook_execution": pos, "orders_after_webhook_execution": orders})
+            contract = build_contract(sig)
+            #logger.info(f"{contract}")
+            # Qualify contract and detect ambiguity
+            qualified = qualify_contract(contract)
+            # qualified = True
+            # logger.info(f"two")
+            # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
+
+            # If 0 or more than 1 contract returned → ambiguous
+            result=None
+            if not qualified or len(qualified) != 1:
+                log_step(
+                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                    f"qualified_count={len(qualified)}"
+                )
+                # logger.info(
+                #     f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                #     f"qualified_count={len(qualified)}"
+                # )
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
+                result.update({
+                    "ok": True,
+                    "action": "skipped_ambiguous_contract",                # INFO: early return
+
+                    "reason": "ambiguous_contract",
+                    "qualified_count": len(qualified)
+                })
+                flush_account_log("WEBHOOK_EXEC")
+            else:
+                result = execute_signal_for_account(IB_INSTANCE, sig, settings,contract)
+                qty = current_position_qty(IB_INSTANCE, contract)
+                trades = IB_INSTANCE.openTrades()
+                filtered = []
+                for t in trades:
+                    try:
+                        if t.contract and t.contract.conId == contract.conId:
+                            filtered.append(t)
+                    except:
+                        continue
+                log_trade_event({"positions_after_webhook_execution": qty, "orders_after_webhook_execution": len(filtered)})
         return jsonify({"ok": result["ok"], "result": result}), 200
 
     except Exception as e:
