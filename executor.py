@@ -1109,7 +1109,7 @@ def open_position_with_brackets(IB_INSTANCE,
     log_step(f"OrdersAfter:    {orders}")
     if pos == 0:
         log_step("[ALARM] No positions were opened")
-    if rders == 0:
+    if orders == 0:
         log_step("[ALARM] No orders were opened")
 
 
@@ -2286,7 +2286,7 @@ def webhook() -> Any:
                             filtered.append(t)
                     except:
                         continue
-                log_trade_event({"positions_after_webhook_execution": qty, "orders_after_webhook_execution": len(filtered)})
+                log_trade_event({"positions_after_webhook_execution": abs(qty), "orders_after_webhook_execution": len(filtered)})
         return jsonify({"ok": result["ok"], "result": result}), 200
 
     except Exception as e:
