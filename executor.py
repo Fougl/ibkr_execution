@@ -898,7 +898,7 @@ def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
     return qty
 
 
-def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
+def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str = "close_position") -> None:
     action = "SELL" if qty > 0 else "BUY"
     log_step(f"CLOSE_POSITION: sending {action} {abs(qty)}")
     log_step(
@@ -930,7 +930,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
             raise RuntimeError("fill_timeout")
 
         #log_trade_event({"trade": "success", "fill_price": fill_price, "action": "close"})
-        log_trade_event({"trade reason": "close_position", "trade direction": action, "fill_price": fill_price})
+        log_trade_event({"trade reason": trade_reason, "trade direction": action, "fill_price": fill_price})
         log_step(
         f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         log_step("CLOSE_POSITION_SUCCESS")
@@ -1028,7 +1028,8 @@ def open_position_with_brackets(IB_INSTANCE,
                                 take_profit: float | None,
                                 stop_loss: float | None,
                                 target_percentage: float | None,
-                                tp_sl_are_multipliers: bool = False
+                                tp_sl_are_multipliers: bool = False,
+                                trade_reason: str = "open_position"
                                 ) -> None:
 
     if take_profit is None or stop_loss is None:
@@ -1041,10 +1042,10 @@ def open_position_with_brackets(IB_INSTANCE,
     # ------------------------------------------------
     # 1️⃣ SEND MARKET PARENT ONLY
     # ------------------------------------------------
-    log_step("start")
+    #log_step("start")
     parent = MarketOrder(action, abs(int(qty)))
     trade = run_ib(ib_place_order(contract, parent))
-    log_step("finish")
+    #log_step("finish")
 
     #log_step("PARENT_ORDER_SUBMITTED")
 
@@ -1204,58 +1205,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
         # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
         pos = IB_INSTANCE.positions()
 
-        # =======================================================
-        # SNAPSHOT OPEN TRADES (NOT openOrders)
-        # =======================================================
-        try:
-            IB_INSTANCE.OpenOrders()
-            #IB_INSTANCE.waitOnUpdate(timeout=2)
-        except Exception:
-            pass
-
-        trades = list(IB_INSTANCE.openTrades())
-        orders_snapshot: List[Dict[str, Any]] = []
-
-        if not trades:
-            log_step("No open orders to cancel")
-        else:
-            for t in trades:
-                o = t.order
-                c = t.contract
-
-                orders_snapshot.append({
-                    "orderId": getattr(o, "orderId", None),
-                    "action": getattr(o, "action", None),
-                    "totalQuantity": getattr(o, "totalQuantity", None),
-                    "orderType": getattr(o, "orderType", None),
-                    "lmtPrice": getattr(o, "lmtPrice", None),
-                    "auxPrice": getattr(o, "auxPrice", None),
-                    "tif": getattr(o, "tif", None),
-
-                    "conId": getattr(c, "conId", None),
-                    "symbol": getattr(c, "symbol", None),
-                    "secType": getattr(c, "secType", None),
-                    "exchange": getattr(c, "exchange", None),
-                    "localSymbol": getattr(c, "localSymbol", None),
-                    "ltm": getattr(c, "lastTradeDateOrContractMonth", None),
-                    "currency": getattr(c, "currency", None),
-                })
-
-            cancel_all_open_orders(IB_INSTANCE, reason="preclose")
-
-        # =======================================================
-        # BUILD MAP FOR CORRECT CONTRACT PAIRING BY conId
-        # =======================================================
-        qualified_by_conid = {}
-        try:
-            more_trades = IB_INSTANCE.openTrades()
-            for t in more_trades:
-                qc = t.contract
-                cid = getattr(qc, "conId", None)
-                if cid:
-                    qualified_by_conid[cid] = qc
-        except:
-            pass
+        
 
         # =======================================================
         # POSITION SNAPSHOT
@@ -1309,10 +1259,64 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 log_step(
                     f"Preclose: acct={ACCOUNT_SHORT_NAME} closing {c.secType} {c.symbol} conId={cid} exch={getattr(c,'exchange',None)} qty={q}"
                 )
+                log_trade_event({"preclose closing for symbol": c.localSymbol,  "quantity": q})
 
-                close_position(IB_INSTANCE, c, q)
+                close_position(IB_INSTANCE, c, q, "preclose closing")
 
         # IB_INSTANCE.disconnect()
+
+        # =======================================================
+        # SNAPSHOT OPEN TRADES (NOT openOrders)
+        # =======================================================
+        try:
+            IB_INSTANCE.OpenOrders()
+            #IB_INSTANCE.waitOnUpdate(timeout=2)
+        except Exception:
+            pass
+
+        trades = list(IB_INSTANCE.openTrades())
+        orders_snapshot: List[Dict[str, Any]] = []
+
+        if not trades:
+            log_step("No open orders to cancel")
+        else:
+            for t in trades:
+                o = t.order
+                c = t.contract
+
+                orders_snapshot.append({
+                    "orderId": getattr(o, "orderId", None),
+                    "action": getattr(o, "action", None),
+                    "totalQuantity": getattr(o, "totalQuantity", None),
+                    "orderType": getattr(o, "orderType", None),
+                    "lmtPrice": getattr(o, "lmtPrice", None),
+                    "auxPrice": getattr(o, "auxPrice", None),
+                    "tif": getattr(o, "tif", None),
+
+                    "conId": getattr(c, "conId", None),
+                    "symbol": getattr(c, "symbol", None),
+                    "secType": getattr(c, "secType", None),
+                    "exchange": getattr(c, "exchange", None),
+                    "localSymbol": getattr(c, "localSymbol", None),
+                    "ltm": getattr(c, "lastTradeDateOrContractMonth", None),
+                    "currency": getattr(c, "currency", None),
+                })
+
+            cancel_all_open_orders(IB_INSTANCE, reason="preclose")
+
+        # =======================================================
+        # BUILD MAP FOR CORRECT CONTRACT PAIRING BY conId
+        # =======================================================
+        qualified_by_conid = {}
+        try:
+            more_trades = IB_INSTANCE.openTrades()
+            for t in more_trades:
+                qc = t.contract
+                cid = getattr(qc, "conId", None)
+                if cid:
+                    qualified_by_conid[cid] = qc
+        except:
+            pass
 
         # =======================================================
         # SAVE PRE-CLOSE STATE
@@ -1436,9 +1440,11 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             except Exception as e:
                 log_step(
                     f"[ALARM][POSTOPEN] qualify failed conId={conId}: {e}")
-
+            #log_trade_event({"postopen reopen for symbol": c.localSymbol, "orders_after_trade_execution": orders})
             direction = +1 if int(meta.get("position", 0)) > 0 else -1
+            action = "BUY" if int(meta.get("position", 0)) > 0 else "SELL"
             qty = abs(int(meta.get("position", 0)))
+            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty})
 
             # ------------------------------
             # Match TP/SL from snapshot
@@ -1476,7 +1482,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                                         take_profit=tp_price,
                                         stop_loss=sl_price,
                                         target_percentage=None,
-                                        tp_sl_are_multipliers=False
+                                        tp_sl_are_multipliers=False,
+                                        trade_reason="postopen reopening"
                                         )
 
             # time.sleep(1)
@@ -2156,7 +2163,7 @@ def background_scheduler_loop():
                         ensure_preclose_close_if_needed(IB_INSTANCE, settings)
 
                     #IB_INSTANCE.disconnect()
-                    logger.info("[IB] Clean disconnect after preclose")
+                    #logger.info("[IB] Clean disconnect after preclose")
                 else:
                     logger.info(
                         "[ALARM] Preclose: IB not able to connected")
@@ -2173,7 +2180,7 @@ def background_scheduler_loop():
                     with IB_LOCK:
                         ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
                     #IB_INSTANCE.disconnect()
-                    logger.info("[IB] Clean disconnect after postopen")
+                    #logger.info("[IB] Clean disconnect after postopen")
                 else:
                     logger.info(
                         "[ALARM] Postopen: IB not able to connected")
