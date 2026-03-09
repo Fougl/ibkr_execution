@@ -2002,15 +2002,14 @@ def background_scheduler_loop():
     Runs rebuild_market_timeline only when market open is set (from SSM or IB), inside the loop.
     Runs ensure_preclose_close_if_needed() and ensure_postopen_reopen_if_needed() once per market day.
     """
+    last_preclose_run_day = None   # date of market_open for the last run
+    last_postopen_run_day = None   # date of market_open for the last run
+    settings = settings_cache.get()
+    rebuild_market_timeline(settings)
     while True:
         try:
             settings = settings_cache.get()
-            effective = _effective_market_settings(settings)
-            if not effective:
-                time.sleep(20)
-                continue
-            rebuild_market_timeline(effective)
-            now_local = now_in_market_tz(effective)
+            now_local = now_in_market_tz(settings)
 
             #rebuild_market_timeline(settings)
 
@@ -2258,7 +2257,7 @@ def webhook() -> Any:
         with IB_LOCK:
             result = execute_signal_for_account(IB_INSTANCE, sig, settings)
             pos=len(IB_INSTANCE.positions())
-            orders=len(IB_INSTANCE.openTrades())
+            orders=len(IB_INSTANCE.openOrders())
             log_trade_event({"positions_after_webhook_execution": pos, "orders_after_trade_execution": orders})
         return jsonify({"ok": result["ok"], "result": result}), 200
 
