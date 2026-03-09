@@ -231,6 +231,62 @@ async def ib_connect_persistent():
             await asyncio.sleep(10)
 
 
+# Used by watchdog to schedule reconnect on IB_LOOP; guard to avoid overlapping reconnects.
+_ib_reconnect_in_progress = False
+_ib_reconnect_lock = threading.Lock()
+
+
+async def _ib_reconnect_async():
+    """
+    Run on IB_LOOP: disconnect current connection (if any), then reconnect.
+    Called from watchdog via asyncio.run_coroutine_threadsafe(..., IB_LOOP).
+    """
+    global IB_INSTANCE, _ib_reconnect_in_progress
+    with _ib_reconnect_lock:
+        if _ib_reconnect_in_progress:
+            return
+        _ib_reconnect_in_progress = True
+    try:
+        # Disconnect and clear state (we are on the thread that owns the connection)
+        if IB_INSTANCE is not None:
+            try:
+                if IB_INSTANCE.isConnected():
+                    IB_INSTANCE.disconnect()
+            except Exception as e:
+                logger.warning("[IB] disconnect before reconnect: %s", e)
+            IB_READY.clear()
+            IB_INSTANCE = None
+
+        port = 4002 + DERIVED_ID
+        cid = 1 + DERIVED_ID
+        for attempt in range(1, 4):
+            ib = IB()
+            try:
+                await ib.connectAsync(
+                    "127.0.0.1",
+                    port,
+                    clientId=cid,
+                    timeout=5
+                )
+                IB_INSTANCE = ib
+                IB_READY.set()
+                logger.info("[IB] Reconnect successful (attempt %d)", attempt)
+                return
+            except Exception as e:
+                try:
+                    if ib.isConnected():
+                        ib.disconnect()
+                except Exception:
+                    pass
+                logger.warning("[IB] reconnect attempt %d failed: %s", attempt, e)
+                if attempt < 3:
+                    await asyncio.sleep(5)
+        logger.error("[IB] Reconnect failed after 3 attempts")
+    finally:
+        with _ib_reconnect_lock:
+            _ib_reconnect_in_progress = False
+
+
 def start_ib():
     logger.info("[IB] starting async connection thread")
     global IB_LOOP
@@ -252,6 +308,10 @@ def run_ib(coro, timeout=10):
 
 def ib_connection_watchdog():
     last_logged_state = None
+    last_disconnect_reminder = 0.0
+    last_reconnect_scheduled = 0.0
+    DISCONNECT_REMINDER_INTERVAL = 60.0  # log "still disconnected" and retry reconnect every 60s
+    RECONNECT_COOLDOWN = 65.0  # don't schedule reconnect more often than this (s)
 
     while True:
         try:
@@ -278,6 +338,25 @@ def ib_connection_watchdog():
                 if last_logged_state is not False:
                     logger.error("[ALARM] IB disconnected")
                     last_logged_state = False
+                    last_disconnect_reminder = now
+                    last_reconnect_scheduled = 0.0  # allow immediate reconnect on transition
+
+                # Schedule reconnect on IB_LOOP (async); respect cooldown and avoid overlapping
+                if IB_LOOP is not None and (now - last_reconnect_scheduled) >= RECONNECT_COOLDOWN:
+                    with _ib_reconnect_lock:
+                        if not _ib_reconnect_in_progress:
+                            try:
+                                asyncio.run_coroutine_threadsafe(
+                                    _ib_reconnect_async(), IB_LOOP
+                                )
+                                last_reconnect_scheduled = now
+                                logger.info("[IB] Watchdog scheduled reconnect on event loop")
+                            except Exception as e:
+                                logger.warning("[IB] Watchdog failed to schedule reconnect: %s", e)
+
+                if now - last_disconnect_reminder >= DISCONNECT_REMINDER_INTERVAL:
+                    logger.warning("[ALARM] IB still disconnected (watchdog check)")
+                    last_disconnect_reminder = now
 
         except Exception as e:
             logger.error(f"[ALARM] IB watchdog error: {e}")
