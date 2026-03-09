@@ -875,7 +875,8 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int) -> None:
         if not fill_price:
             raise RuntimeError("fill_timeout")
 
-        log_trade_event({"trade": "success", "fill_price": fill_price, "action": "close"})
+        #log_trade_event({"trade": "success", "fill_price": fill_price, "action": "close"})
+        log_trade_event({"trade reason": "close_position", "trade direction": action, "fill_price": fill_price})
         log_step(
         f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         log_step("CLOSE_POSITION_SUCCESS")
@@ -1078,14 +1079,18 @@ def open_position_with_brackets(IB_INSTANCE,
     run_ib(ib_place_order(contract, sl_order))
 
     # Trades log: confirmation with fill price
-    log_trade_event({"trade": "success", "fill_price": fill_price, "action": "open"})
+    log_trade_event({"trade reason": "open_position", "trade direction": action, "fill_price": fill_price, "TP": tp_price, "SL": sl_price})
+    
 
     #log_step("BRACKET_CHILDREN_SUBMITTED")
-    log_step(f"PositionsAfter: {len(IB_INSTANCE.positions())}")
-    log_step(f"OrdersAfter:    {len(IB_INSTANCE.openTrades())}")
-    if len(IB_INSTANCE.positions()) == 0:
+    pos=len(IB_INSTANCE.positions())
+    orders=len(IB_INSTANCE.openTrades())
+    #log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+    log_step(f"PositionsAfter: {pos}")
+    log_step(f"OrdersAfter:    {orders}")
+    if len(pos) == 0:
         log_step("[ALARM] No positions were opened")
-    if len(IB_INSTANCE.openTrades()) == 0:
+    if len(orders) == 0:
         log_step("[ALARM] No orders were opened")
 
 
@@ -1567,8 +1572,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         if qty != 0:
             side = "BUY" if qty > 0 else "SELL"
             log_step(f"Current position for symbol: {side} {abs(qty)}")
+            log_trade_event({"before trade state_check":  "opened_positions", "quantity": abs(qty), "side": side})
         else:
             log_step("Current position for symbol: No opened positions")
+            log_trade_event({"before trade state_check":  "opened_positions", "quantity": 0})
 
         try:
             trades = IB_INSTANCE.openTrades()
@@ -1605,6 +1612,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                             f"qty={getattr(o,'totalQuantity',None)}"
                         ])
                     )
+                    log_trade_event({"before trade state_check":  "opened_orders", "order_type": getattr(o,'orderType',None), "quantity": abs(qty)})
                 except Exception as e:
                     log_step(f"ERROR printing open order: {e}")
                     raise
@@ -1648,6 +1656,9 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 result.update({"ok": True, "action": "none_already_flat"})
                 # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
                 # IB_INSTANCE.disconnect()
+                # pos=len(IB_INSTANCE.positions())
+                # orders=len(IB_INSTANCE.openTrades())
+                # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -1671,6 +1682,9 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                                    reason="exit_signal",
                                    contract=contract
                                    )
+            # pos=len(IB_INSTANCE.positions())
+            # orders=len(IB_INSTANCE.openTrades())
+            # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
             log_step("Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
             # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
@@ -1696,16 +1710,24 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                         {"ok": False, "action": "exit_failed_after_retry"})
                     # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
                     # IB_INSTANCE.disconnect()
+                    # pos=len(IB_INSTANCE.positions())
+                    # orders=len(IB_INSTANCE.openTrades())
+                    # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_long", contract=contract)
                 result.update({"ok": True, "action": "exit_long_closed"})
+                # pos=len(IB_INSTANCE.positions())
+                # orders=len(IB_INSTANCE.openTrades())
+                # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
                 result.update(
                     {"ok": True, "action": "exit_long_no_long_position"})
+
+                #log_trade_event({"event": "no_long_postions_opened"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -1726,6 +1748,9 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
 
                     result.update(
                         {"ok": False, "action": "exit_failed_after_retry"})
+                    # pos=len(IB_INSTANCE.positions())
+                    # orders=len(IB_INSTANCE.openTrades())
+                    # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                     # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
                     # IB_INSTANCE.disconnect()
                     flush_account_log("WEBHOOK_EXEC")
@@ -1733,12 +1758,16 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_short", contract=contract)
                 result.update({"ok": True, "action": "exit_short_closed"})
+                # pos=len(IB_INSTANCE.positions())
+                # orders=len(IB_INSTANCE.openTrades())
+                #log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
                 result.update(
                     {"ok": True, "action": "exit_short_no_short_position"})
                 flush_account_log("WEBHOOK_EXEC")
+                #log_trade_event({"event": "no_short_postions_opened"})
                 return result
 
         # ----------------------------------------------------------
@@ -1750,6 +1779,9 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings) -> 
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
             log_step(
                 "[EXEC] Same direction position already opened. Skipping execution")
+            pos=len(IB_INSTANCE.positions())
+            orders=len(IB_INSTANCE.openTrades())
+            #log_trade_event({"event": "same_position_already_open_skipping", "positions_already_opened": pos, "orders_alreay_opened": orders})
             result.update(
                 {"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
             # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
@@ -2195,6 +2227,7 @@ def webhook() -> Any:
                 f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
                 f"now={now_local.isoformat()} alert={sig.raw_alert}"
             )
+            og_trade_event({"event": "outside_market_hours_skipping_execution"})
             return jsonify({
                 "ok": True,
                 "ignored": True,
@@ -2208,6 +2241,7 @@ def webhook() -> Any:
                 f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['next_postopen']} close={_market_times['next_preclose']} ")
             logger.info(
                 f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+            log_trade_event({"event": "outside_market_hours_skipping_execution"})
             return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
 
         # if within_preclose_window(now_local, settings):
@@ -2223,9 +2257,13 @@ def webhook() -> Any:
             return jsonify({"ok": False, "error": "ib_not_connected"}), 503
         with IB_LOCK:
             result = execute_signal_for_account(IB_INSTANCE, sig, settings)
+            pos=len(IB_INSTANCE.positions())
+            orders=len(IB_INSTANCE.openTrades())
+            log_trade_event({"positions_after_webhook_execution": pos, "orders_after_trade_execution": orders})
         return jsonify({"ok": result["ok"], "result": result}), 200
 
     except Exception as e:
+        log_trade_event({"error": {e}})
         logger.exception(
             f"[ALARM] Webhook handling failed. payload={payload} err={e}")
         return jsonify({"ok": False, "error": str(e)}), 400
