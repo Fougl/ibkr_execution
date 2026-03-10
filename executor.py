@@ -1316,10 +1316,13 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                         "conId": getattr(c, "conId", None),
                     }
 
-            # =======================================================
-            # CLOSE POSITION using paired, qualified contract
-            # =======================================================
-            for p in pos:
+        # =======================================================
+        # CLOSE POSITION using paired, qualified contract
+        # =======================================================
+        # Map of conId -> qualified contract (may be populated/updated later)
+        qualified_by_conid = {}
+
+        for p in pos:
                 q = int(p.position)
                 if q == 0:
                     continue
@@ -1388,9 +1391,8 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
             cancel_all_open_orders(IB_INSTANCE, reason="preclose")
 
         # =======================================================
-        # BUILD MAP FOR CORRECT CONTRACT PAIRING BY conId
+        # BUILD / UPDATE MAP FOR CORRECT CONTRACT PAIRING BY conId
         # =======================================================
-        qualified_by_conid = {}
         try:
             more_trades = IB_INSTANCE.openTrades()
             for t in more_trades:
