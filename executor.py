@@ -994,7 +994,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str 
         order = MarketOrder(action, abs(int(qty)))
         trade = run_ib(ib_place_order(contract, order))
     
-        timeout = time.time() + 5
+        timeout = time.time() + 30
         fill_price = None
         
         while time.time() < timeout:
@@ -1165,7 +1165,7 @@ def open_position_with_brackets(IB_INSTANCE,
     timeout = time.time() + 10
 
     try:
-        timeout = time.time() + 5
+        timeout = time.time() + 30
         fill_price = None
         
         while time.time() < timeout:
