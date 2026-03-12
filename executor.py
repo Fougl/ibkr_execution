@@ -1559,7 +1559,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             direction = +1 if int(meta.get("position", 0)) > 0 else -1
             action = "BUY" if int(meta.get("position", 0)) > 0 else "SELL"
             qty = abs(int(meta.get("position", 0)))
-            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty})
+            qty2 = int(meta.get("position", 0))
+            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
 
             # ------------------------------
             # Match TP/SL from snapshot
@@ -1760,7 +1761,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                             f"qty={getattr(o,'totalQuantity',None)}"
                         ])
                     )
-                    log_trade_event({"before trade state_check":  "opened_orders", "order_type": getattr(o,'orderType',None), "quantity": abs(qty)})
+                    log_trade_event({"before trade state_check":  "opened_orders", "direction": action, "order_type": getattr(o,'orderType',None), "quantity": qty})
                 except Exception as e:
                     log_step(f"ERROR printing open order: {e}")
                     raise
