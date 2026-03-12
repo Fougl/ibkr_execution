@@ -1761,7 +1761,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                             f"qty={getattr(o,'totalQuantity',None)}"
                         ])
                     )
-                    log_trade_event({"before trade state_check":  "opened_orders", "direction": {getattr(o,'action',None), "order_type": getattr(o,'orderType',None), "quantity": qty})
+                    log_trade_event({"before trade state_check":  "opened_orders", "direction": getattr(o,'action',None), "order_type": getattr(o,'orderType',None), "quantity": qty})
                 except Exception as e:
                     log_step(f"ERROR printing open order: {e}")
                     raise
