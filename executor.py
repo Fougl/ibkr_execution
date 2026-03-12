@@ -1335,6 +1335,12 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                         str(getattr(c, "conId", "")) or
                         f"{c.secType}:{c.symbol}:{getattr(c, 'exchange', '')}"
                     )
+
+                    # IB position object exposes the average entry price as avgCost / avgPrice
+                    avg_entry = getattr(p, "avgCost", None)
+                    if avg_entry is None:
+                        avg_entry = getattr(p, "avgPrice", 0.0)
+
                     snapshot[key] = {
                         "secType": c.secType,
                         "symbol": c.symbol,
@@ -1343,8 +1349,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                         "lastTradeDateOrContractMonth": getattr(c, "lastTradeDateOrContractMonth", ""),
                         "position": int(p.position),
                         "conId": getattr(c, "conId", None),
-                        # will be populated after close is executed
-                        "close_fill": None,
+                        "entry_avg_price": float(avg_entry) if avg_entry is not None else None,
                     }
 
         # =======================================================
@@ -1378,17 +1383,10 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 )
                 log_trade_event({"preclose closing for symbol": c.localSymbol,  "quantity": q})
 
-                fill_price = close_position(IB_INSTANCE, c, q, "preclose closing")
-
-                # Store close fill on the snapshot entry so postopen can
-                # reconstruct TP/SL percentages relative to this price.
-                if fill_price is not None:
-                    key = (
-                        str(cid) if cid is not None else
-                        f"{c.secType}:{c.symbol}:{getattr(c, 'exchange', '')}"
-                    )
-                    if key in snapshot:
-                        snapshot[key]["close_fill"] = float(fill_price)
+                # We still call close_position (which returns the close fill),
+                # but for state we persist the *entry* average price from the
+                # snapshot above, not the close fill.
+                close_position(IB_INSTANCE, c, q, "preclose closing")
 
         # IB_INSTANCE.disconnect()
 
@@ -1593,27 +1591,27 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                     sl_price = float(aux)
 
             # ------------------------------
-            # Derive TP/SL percentages from stored preclose close_fill (if any)
+            # Derive TP/SL percentages from stored entry_avg_price (if any)
             # ------------------------------
             tp_arg = tp_price
             sl_arg = sl_price
             use_percentages = False
 
-            close_fill = None
+            entry_avg = None
             try:
-                close_fill = float(meta.get("close_fill")) if meta.get("close_fill") is not None else None
+                entry_avg = float(meta.get("entry_avg_price")) if meta.get("entry_avg_price") is not None else None
             except Exception:
-                close_fill = None
+                entry_avg = None
 
-            if close_fill and tp_price is not None and sl_price is not None:
+            if entry_avg and tp_price is not None and sl_price is not None:
                 if direction > 0:
                     # Long: TP above, SL below
-                    tp_pct = (tp_price - close_fill) / close_fill * 100.0
-                    sl_pct = (close_fill - sl_price) / close_fill * 100.0
+                    tp_pct = (tp_price - entry_avg) / entry_avg * 100.0
+                    sl_pct = (entry_avg - sl_price) / entry_avg * 100.0
                 else:
                     # Short: TP below, SL above
-                    tp_pct = (close_fill - tp_price) / close_fill * 100.0
-                    sl_pct = (sl_price - close_fill) / close_fill * 100.0
+                    tp_pct = (entry_avg - tp_price) / entry_avg * 100.0
+                    sl_pct = (sl_price - entry_avg) / entry_avg * 100.0
 
                 if tp_pct > 0 and sl_pct > 0:
                     tp_arg = tp_pct
@@ -1623,7 +1621,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             log_step(
                 f"[POSTOPEN] Reopening with bracket acct={ACCOUNT_SHORT_NAME} "
                 f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
-                f"tp={tp_price} sl={sl_price} close_fill={close_fill} "
+                f"tp={tp_price} sl={sl_price} entry_avg={entry_avg} "
                 f"use_percentages={use_percentages}"
             )
             if qty <= 0 or tp_price is None or sl_price is None:
