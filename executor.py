@@ -1016,12 +1016,42 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str 
         return
 
     except Exception as e:
-        if "TimeoutError" in str(e):
+        # Enrich diagnostics so we can see *why* IB refused or failed to fill.
+        try:
+            status = getattr(trade, "orderStatus", None) if "trade" in locals() else None
+            status_text = getattr(status, "status", None)
+            remaining = getattr(status, "remaining", None)
+            log_msgs = getattr(trade, "log", []) if "trade" in locals() else []
+        except Exception:
+            status_text = None
+            remaining = None
+            log_msgs = []
+
+        if "TimeoutError" in str(e) or str(e) in ("fill_timeout", "close_position_fill_timeout"):
             log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
-            log_trade_event({"trade": "fail", "reason": "close_fill_timeout", "fill_price": None})
+            log_step(
+                f"[CLOSE_DEBUG] status={status_text} remaining={remaining} "
+                f"log_msgs={[str(m) for m in log_msgs]}"
+            )
+            log_trade_event({
+                "trade": "fail",
+                "reason": "close_fill_timeout",
+                "fill_price": None,
+                "status": status_text,
+                "remaining": remaining,
+                "log_msgs": [str(m) for m in log_msgs],
+            })
         else:
-            log_step(f"CLOSE_POSITION_FAIL: error={e}")
-            log_trade_event({"trade": "fail", "reason": str(e), "fill_price": None})
+            log_step(f"CLOSE_POSITION_FAIL: error={e} status={status_text} remaining={remaining}")
+            log_step(f"[CLOSE_DEBUG] log_msgs={[str(m) for m in log_msgs]}")
+            log_trade_event({
+                "trade": "fail",
+                "reason": str(e),
+                "fill_price": None,
+                "status": status_text,
+                "remaining": remaining,
+                "log_msgs": [str(m) for m in log_msgs],
+            })
         raise
     log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
     log_trade_event({"trade": "fail", "reason": "close_fill_timeout", "fill_price": None})
