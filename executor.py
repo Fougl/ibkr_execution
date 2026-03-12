@@ -977,7 +977,7 @@ def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
     return qty
 
 
-def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str = "close_position") -> None:
+def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str = "close_position") -> float | None:
     action = "SELL" if qty > 0 else "BUY"
     log_step(f"CLOSE_POSITION: sending {action} {abs(qty)}")
     log_step(
@@ -1013,7 +1013,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str 
         log_step(
         f"CLOSE_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         log_step("CLOSE_POSITION_SUCCESS")
-        return
+        return fill_price
 
     except Exception as e:
         # Enrich diagnostics so we can see *why* IB refused or failed to fill.
@@ -1342,8 +1342,9 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                         "currency": getattr(c, "currency", ""),
                         "lastTradeDateOrContractMonth": getattr(c, "lastTradeDateOrContractMonth", ""),
                         "position": int(p.position),
-                        # <-- THIS IS THE FIX
                         "conId": getattr(c, "conId", None),
+                        # will be populated after close is executed
+                        "close_fill": None,
                     }
 
         # =======================================================
@@ -1377,7 +1378,17 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 )
                 log_trade_event({"preclose closing for symbol": c.localSymbol,  "quantity": q})
 
-                close_position(IB_INSTANCE, c, q, "preclose closing")
+                fill_price = close_position(IB_INSTANCE, c, q, "preclose closing")
+
+                # Store close fill on the snapshot entry so postopen can
+                # reconstruct TP/SL percentages relative to this price.
+                if fill_price is not None:
+                    key = (
+                        str(cid) if cid is not None else
+                        f"{c.secType}:{c.symbol}:{getattr(c, 'exchange', '')}"
+                    )
+                    if key in snapshot:
+                        snapshot[key]["close_fill"] = float(fill_price)
 
         # IB_INSTANCE.disconnect()
 
@@ -1581,10 +1592,39 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 if ot == "STP" and aux is not None:
                     sl_price = float(aux)
 
+            # ------------------------------
+            # Derive TP/SL percentages from stored preclose close_fill (if any)
+            # ------------------------------
+            tp_arg = tp_price
+            sl_arg = sl_price
+            use_percentages = False
+
+            close_fill = None
+            try:
+                close_fill = float(meta.get("close_fill")) if meta.get("close_fill") is not None else None
+            except Exception:
+                close_fill = None
+
+            if close_fill and tp_price is not None and sl_price is not None:
+                if direction > 0:
+                    # Long: TP above, SL below
+                    tp_pct = (tp_price - close_fill) / close_fill * 100.0
+                    sl_pct = (close_fill - sl_price) / close_fill * 100.0
+                else:
+                    # Short: TP below, SL above
+                    tp_pct = (close_fill - tp_price) / close_fill * 100.0
+                    sl_pct = (sl_price - close_fill) / close_fill * 100.0
+
+                if tp_pct > 0 and sl_pct > 0:
+                    tp_arg = tp_pct
+                    sl_arg = sl_pct
+                    use_percentages = True
+
             log_step(
                 f"[POSTOPEN] Reopening with bracket acct={ACCOUNT_SHORT_NAME} "
                 f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
-                f"tp={tp_price} sl={sl_price}"
+                f"tp={tp_price} sl={sl_price} close_fill={close_fill} "
+                f"use_percentages={use_percentages}"
             )
             if qty <= 0 or tp_price is None or sl_price is None:
                 log_step(
@@ -1595,10 +1635,10 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                                         c,
                                         direction,
                                         qty,
-                                        take_profit=tp_price,
-                                        stop_loss=sl_price,
+                                        take_profit=tp_arg,
+                                        stop_loss=sl_arg,
                                         target_percentage=None,
-                                        tp_sl_are_multipliers=True,
+                                        tp_sl_are_multipliers=not use_percentages,
                                         trade_reason="postopen reopening"
                                         )
 
