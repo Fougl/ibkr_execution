@@ -50,7 +50,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, time as dtime, timezone
 from logging.handlers import RotatingFileHandler
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -113,6 +113,85 @@ CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
+
+# Symbol registry & schedules (per account)
+SYMBOL_REGISTRY_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    f"known_symbols-{ACCOUNT_SHORT_NAME}.json"
+)
+SYMBOL_SCHEDULE_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    f"symbol_schedules-{ACCOUNT_SHORT_NAME}.json"
+)
+_symbol_registry_lock = threading.Lock()
+_symbol_schedule_lock = threading.Lock()
+
+
+def _atomic_write_json(path: str, obj: dict) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def register_symbol_usage_from_signal(sig: "Signal") -> None:
+    """
+    Persist the IB-mapped symbol (sig.symbol) and exchange from the webhook
+    so we know which contracts to refresh tradingHours for.
+    """
+    local_symbol = getattr(sig, "symbol", None)
+    exchange = getattr(sig, "exchange", None)
+
+    if not local_symbol:
+        return
+
+    with _symbol_registry_lock:
+        try:
+            if os.path.exists(SYMBOL_REGISTRY_PATH):
+                with open(SYMBOL_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            else:
+                data = {}
+        except Exception:
+            data = {}
+
+        entry = data.get(local_symbol, {})
+        entry["localSymbol"] = local_symbol
+        if exchange:
+            entry["exchange"] = exchange
+        entry.setdefault("secType", "FUT")
+        entry.setdefault("currency", "USD")
+        data[local_symbol] = entry
+
+        _atomic_write_json(SYMBOL_REGISTRY_PATH, data)
+
+
+def _load_symbol_registry() -> dict:
+    with _symbol_registry_lock:
+        try:
+            if not os.path.exists(SYMBOL_REGISTRY_PATH):
+                return {}
+            with open(SYMBOL_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+
+def _merge_symbol_schedules(new_data: dict) -> None:
+    with _symbol_schedule_lock:
+        try:
+            if os.path.exists(SYMBOL_SCHEDULE_PATH):
+                with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            else:
+                existing = {}
+        except Exception:
+            existing = {}
+
+        for sym, sched in new_data.items():
+            existing.setdefault(sym, {}).update(sched)
+
+        _atomic_write_json(SYMBOL_SCHEDULE_PATH, existing)
 
 
 # Resolve AWS region ONCE at startup
@@ -1286,6 +1365,121 @@ def qualify_contract(contract):
 # ---------------------------
 # Pre-close / post-open logic (ONLY runs when webhook arrives)
 # ---------------------------
+
+
+async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict:
+    """
+    Runs on IB_LOOP: request ContractDetails and parse tradingHours into UTC
+    open/close times keyed by date (YYYY-MM-DD).
+    """
+    c = Future(
+        localSymbol=local_symbol,
+        exchange=info.get("exchange", "CME"),
+        currency=info.get("currency", "USD"),
+    )
+
+    details_list = await IB_INSTANCE.reqContractDetailsAsync(c)
+    if not details_list:
+        return {}
+
+    cd = details_list[0]
+    tz_name = getattr(cd, "timeZoneId", "America/New_York")
+    try:
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo(tz_name)
+    except Exception:
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo("America/New_York")
+
+    out: dict[str, dict] = {}
+    th_str = getattr(cd, "tradingHours", "") or ""
+    for segment in th_str.split(";"):
+        segment = segment.strip()
+        if not segment or ":" not in segment:
+            continue
+        day_part, hours_part = segment.split(":", 1)
+        if hours_part.upper() == "CLOSED":
+            continue
+        for rng in hours_part.split(","):
+            if "-" not in rng:
+                continue
+            start_str, end_str = rng.split("-", 1)
+            if len(start_str) != 12 or len(end_str) != 12:
+                continue
+            try:
+                start_local = datetime.strptime(start_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
+                end_local = datetime.strptime(end_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
+            except Exception:
+                continue
+
+            date_key = start_local.date().isoformat()
+            start_utc = start_local.astimezone(timezone.utc).isoformat()
+            end_utc = end_local.astimezone(timezone.utc).isoformat()
+
+            d = out.setdefault(date_key, {})
+            if "open" not in d or start_utc < d["open"]:
+                d["open"] = start_utc
+            if "close" not in d or end_utc > d.get("close", ""):
+                d["close"] = end_utc
+
+    return out
+
+
+def _weekly_trading_hours_worker():
+    """
+    Once per week on Sunday ~01:00 UTC, fetch tradingHours for all symbols
+    in the registry and store them into SYMBOL_SCHEDULE_PATH.
+    """
+    last_week_key = None
+
+    while True:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            iso_year, iso_week, _ = now_utc.isocalendar()
+            week_key = f"{iso_year}-W{iso_week:02d}"
+
+            # Sunday (6) between 01:00 and 01:10 UTC
+            if (
+                now_utc.weekday() == 6
+                and dtime(1, 0) <= now_utc.time() <= dtime(1, 10)
+                and last_week_key != week_key
+            ):
+                symbols = _load_symbol_registry()
+                if IB_INSTANCE is None or not IB_READY.is_set():
+                    logger.warning("[TRADING_HOURS] IB not ready; skipping this run")
+                elif not symbols:
+                    logger.info("[TRADING_HOURS] No symbols in registry yet")
+                else:
+                    async def _job():
+                        all_sched: dict[str, dict] = {}
+                        for lsym, info in symbols.items():
+                            try:
+                                sched = await _fetch_trading_hours_for_symbol(lsym, info)
+                                if sched:
+                                    all_sched[lsym] = sched
+                            except Exception as e:
+                                logger.warning("[TRADING_HOURS] Failed for %s: %s", lsym, e)
+                        return all_sched
+
+                    fut = asyncio.run_coroutine_threadsafe(_job(), IB_LOOP)
+                    try:
+                        new_data = fut.result(timeout=120)
+                        _merge_symbol_schedules(new_data)
+                        logger.info(
+                            "[TRADING_HOURS] Updated schedules for %d symbols (week %s)",
+                            len(new_data),
+                            week_key,
+                        )
+                        last_week_key = week_key
+                    except Exception as e:
+                        logger.warning("[TRADING_HOURS] Scheduler error: %s", e)
+
+        except Exception as e:
+            logger.warning("[TRADING_HOURS] Worker loop error: %s", e)
+
+        time.sleep(60)
+
+# ---------------------------
 def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
     now_local = now_in_market_tz(settings)
 
@@ -2379,6 +2573,11 @@ threading.Thread(
     target=ib_connection_watchdog,
     daemon=True
 ).start()
+
+threading.Thread(
+    target=_weekly_trading_hours_worker,
+    daemon=True
+).start()
 # start_ib_connection()
 # ---------------------------
 # Flask app
@@ -2404,6 +2603,8 @@ def webhook() -> Any:
         settings = settings_cache.get()
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         sig = parse_signal(payload)
+        # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
+        register_symbol_usage_from_signal(sig)
         # logger.info(
         #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
