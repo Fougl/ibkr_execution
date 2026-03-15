@@ -114,14 +114,14 @@ CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
 
-# Symbol registry & schedules (per account)
+# Symbol registry & schedules (GLOBAL — shared across accounts on the host)
 SYMBOL_REGISTRY_PATH = os.path.join(
     os.path.dirname(STATE_PATH),
-    f"known_symbols-{ACCOUNT_SHORT_NAME}.json"
+    "known_symbols.json"
 )
 SYMBOL_SCHEDULE_PATH = os.path.join(
     os.path.dirname(STATE_PATH),
-    f"symbol_schedules-{ACCOUNT_SHORT_NAME}.json"
+    "symbol_schedules.json"
 )
 _symbol_registry_lock = threading.Lock()
 _symbol_schedule_lock = threading.Lock()
