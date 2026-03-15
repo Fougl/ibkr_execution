@@ -136,8 +136,9 @@ def _atomic_write_json(path: str, obj: dict) -> None:
 
 def register_symbol_usage_from_signal(sig: "Signal") -> None:
     """
-    Persist the IB-mapped symbol (sig.symbol) and exchange from the webhook
-    so we know which contracts to refresh tradingHours for.
+    Persist the IB-mapped symbol (sig.symbol) and exchange from the webhook.
+    If the symbol was not already in the registry, fetch and save its trading
+    hours immediately so symbol_schedules.json is filled for that symbol.
     """
     local_symbol = getattr(sig, "symbol", None)
     exchange = getattr(sig, "exchange", None)
@@ -155,6 +156,7 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
         except Exception:
             data = {}
 
+        was_new = local_symbol not in data
         entry = data.get(local_symbol, {})
         entry["localSymbol"] = local_symbol
         if exchange:
@@ -164,6 +166,21 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
         data[local_symbol] = entry
 
         _atomic_write_json(SYMBOL_REGISTRY_PATH, data)
+
+    # If symbol was just added, fill trading hours for it now (don't wait for Sunday).
+    if was_new and IB_LOOP is not None and IB_READY.is_set():
+        try:
+            async def _fetch_one():
+                sched = await _fetch_trading_hours_for_symbol(local_symbol, entry)
+                return {local_symbol: sched} if sched else {}
+
+            fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
+            new_data = fut.result(timeout=30)
+            if new_data:
+                _merge_symbol_schedules(new_data)
+                logger.info("[TRADING_HOURS] Filled hours for new symbol %s", local_symbol)
+        except Exception as e:
+            logger.warning("[TRADING_HOURS] Failed to fill hours for new symbol %s: %s", local_symbol, e)
 
 
 def _load_symbol_registry() -> dict:
@@ -1438,20 +1455,12 @@ def _weekly_trading_hours_worker():
             iso_year, iso_week, _ = now_utc.isocalendar()
             week_key = f"{iso_year}-W{iso_week:02d}"
 
-            should_run = False
-
-            # 1) First-ever run in this process → run immediately once
-            if last_week_key is None:
-                should_run = True
-            # 2) Weekly refresh window: Sunday 01:00–01:10 UTC, once per ISO week
-            elif (
+            # Sunday (6) between 01:00 and 01:10 UTC, once per ISO week
+            if (
                 now_utc.weekday() == 6
                 and dtime(1, 0) <= now_utc.time() <= dtime(1, 10)
                 and last_week_key != week_key
             ):
-                should_run = True
-
-            if should_run:
                 symbols = _load_symbol_registry()
                 if IB_INSTANCE is None or not IB_READY.is_set():
                     logger.warning("[TRADING_HOURS] IB not ready; skipping this run")
