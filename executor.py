@@ -137,8 +137,6 @@ def _atomic_write_json(path: str, obj: dict) -> None:
 def register_symbol_usage_from_signal(sig: "Signal") -> None:
     """
     Persist the IB-mapped symbol (sig.symbol) and exchange from the webhook.
-    If the symbol was not already in the registry, fetch and save its trading
-    hours immediately so symbol_schedules.json is filled for that symbol.
     """
     local_symbol = getattr(sig, "symbol", None)
     exchange = getattr(sig, "exchange", None)
@@ -146,6 +144,7 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
     if not local_symbol:
         return
 
+    entry: dict
     with _symbol_registry_lock:
         try:
             if os.path.exists(SYMBOL_REGISTRY_PATH):
@@ -156,7 +155,6 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
         except Exception:
             data = {}
 
-        was_new = local_symbol not in data
         entry = data.get(local_symbol, {})
         entry["localSymbol"] = local_symbol
         if exchange:
@@ -167,20 +165,40 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
 
         _atomic_write_json(SYMBOL_REGISTRY_PATH, data)
 
-    # If symbol was just added, fill trading hours for it now (don't wait for Sunday).
-    if was_new and IB_LOOP is not None and IB_READY.is_set():
-        try:
-            async def _fetch_one():
-                sched = await _fetch_trading_hours_for_symbol(local_symbol, entry)
-                return {local_symbol: sched} if sched else {}
+    # From the webhook thread: only fetch trading hours if we don't already have
+    # an entry for *today* for this symbol in symbol_schedules.json.
+    today_key = datetime.utcnow().date().isoformat()
+    need_fetch = True
 
-            fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
-            new_data = fut.result(timeout=30)
-            if new_data:
-                _merge_symbol_schedules(new_data)
-                logger.info("[TRADING_HOURS] Filled hours for new symbol %s", local_symbol)
-        except Exception as e:
-            logger.warning("[TRADING_HOURS] Failed to fill hours for new symbol %s: %s", local_symbol, e)
+    with _symbol_schedule_lock:
+        try:
+            if os.path.exists(SYMBOL_SCHEDULE_PATH):
+                with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+                    sched_all = json.load(f)
+                sym_sched = sched_all.get(local_symbol, {})
+                if today_key in sym_sched:
+                    need_fetch = False
+        except Exception:
+            # On any error, fall back to fetching
+            need_fetch = True
+
+    if not need_fetch or IB_LOOP is None or not IB_READY.is_set():
+        return
+
+    try:
+        async def _fetch_one():
+            sched = await _fetch_trading_hours_for_symbol(local_symbol, entry)
+            return {local_symbol: sched} if sched else {}
+
+        fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
+        new_data = fut.result(timeout=30)
+        if new_data:
+            _merge_symbol_schedules(new_data)
+            logger.info("[TRADING_HOURS] Filled hours for symbol %s via webhook", local_symbol)
+        else:
+            logger.info("[TRADING_HOURS] No tradingHours data yet for symbol %s", local_symbol)
+    except Exception as e:
+        logger.warning("[TRADING_HOURS] Failed to fill hours for symbol %s: %s", local_symbol, e)
 
 
 def _load_symbol_registry() -> dict:
@@ -2588,11 +2606,6 @@ start_ib()
 
 threading.Thread(
     target=ib_connection_watchdog,
-    daemon=True
-).start()
-
-threading.Thread(
-    target=_weekly_trading_hours_worker,
     daemon=True
 ).start()
 # start_ib_connection()
