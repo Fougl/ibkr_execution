@@ -176,6 +176,11 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
 
         fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
         new_data = fut.result(timeout=30)
+
+        # Always ensure the schedules file exists, even if no data yet.
+        if not os.path.exists(SYMBOL_SCHEDULE_PATH):
+            _atomic_write_json(SYMBOL_SCHEDULE_PATH, {})
+
         if new_data:
             _merge_symbol_schedules(new_data)
             logger.info("[TRADING_HOURS] Filled hours for symbol %s via webhook", local_symbol)
@@ -1401,20 +1406,24 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
 
     out: dict[str, dict] = {}
     th_str = getattr(cd, "tradingHours", "") or ""
+
+    # Format per IB docs (example):
+    # "20260315:1700-20260316:1600;20260316:1700-20260317:1600;..."
     for segment in th_str.split(";"):
         segment = segment.strip()
         if not segment or ":" not in segment:
             continue
-        day_part, hours_part = segment.split(":", 1)
-        if hours_part.upper() == "CLOSED":
-            continue
-        for rng in hours_part.split(","):
-            if "-" not in rng:
-                continue
-            start_str, end_str = rng.split("-", 1)
-            if len(start_str) != 12 or len(end_str) != 12:
+        # Each segment looks like "YYYYMMDD:HHMM-YYYYMMDD:HHMM[,YYYYMMDD:HHMM-...]"
+        for rng in segment.split(","):
+            rng = rng.strip()
+            if "-" not in rng or ":" not in rng:
                 continue
             try:
+                start_part, end_part = rng.split("-", 1)
+                start_day, start_time = start_part.split(":", 1)
+                end_day, end_time = end_part.split(":", 1)
+                start_str = f"{start_day}{start_time}"
+                end_str = f"{end_day}{end_time}"
                 start_local = datetime.strptime(start_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
                 end_local = datetime.strptime(end_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
             except Exception:
