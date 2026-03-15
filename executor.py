@@ -1438,12 +1438,20 @@ def _weekly_trading_hours_worker():
             iso_year, iso_week, _ = now_utc.isocalendar()
             week_key = f"{iso_year}-W{iso_week:02d}"
 
-            # Sunday (6) between 01:00 and 01:10 UTC
-            if (
+            should_run = False
+
+            # 1) First-ever run in this process → run immediately once
+            if last_week_key is None:
+                should_run = True
+            # 2) Weekly refresh window: Sunday 01:00–01:10 UTC, once per ISO week
+            elif (
                 now_utc.weekday() == 6
                 and dtime(1, 0) <= now_utc.time() <= dtime(1, 10)
                 and last_week_key != week_key
             ):
+                should_run = True
+
+            if should_run:
                 symbols = _load_symbol_registry()
                 if IB_INSTANCE is None or not IB_READY.is_set():
                     logger.warning("[TRADING_HOURS] IB not ready; skipping this run")
