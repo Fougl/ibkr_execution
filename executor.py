@@ -114,16 +114,11 @@ CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
 
-# Symbol registry & schedules (GLOBAL — shared across accounts on the host)
-SYMBOL_REGISTRY_PATH = os.path.join(
-    os.path.dirname(STATE_PATH),
-    "known_symbols.json"
-)
+# Trading-hours schedules (GLOBAL — shared across accounts on the host)
 SYMBOL_SCHEDULE_PATH = os.path.join(
     os.path.dirname(STATE_PATH),
     "symbol_schedules.json"
 )
-_symbol_registry_lock = threading.Lock()
 _symbol_schedule_lock = threading.Lock()
 
 
@@ -136,7 +131,9 @@ def _atomic_write_json(path: str, obj: dict) -> None:
 
 def register_symbol_usage_from_signal(sig: "Signal") -> None:
     """
-    Persist the IB-mapped symbol (sig.symbol) and exchange from the webhook.
+    From the webhook thread: ensure we have trading-hours data in
+    symbol_schedules.json for the current day for this IB-mapped symbol.
+    No separate known_symbols.json is maintained anymore.
     """
     local_symbol = getattr(sig, "symbol", None)
     exchange = getattr(sig, "exchange", None)
@@ -144,29 +141,16 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
     if not local_symbol:
         return
 
-    entry: dict
-    with _symbol_registry_lock:
-        try:
-            if os.path.exists(SYMBOL_REGISTRY_PATH):
-                with open(SYMBOL_REGISTRY_PATH, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            else:
-                data = {}
-        except Exception:
-            data = {}
+    # Minimal contract info needed to request ContractDetails
+    entry: dict = {
+        "localSymbol": local_symbol,
+        "exchange": exchange or "CME",
+        "secType": "FUT",
+        "currency": "USD",
+    }
 
-        entry = data.get(local_symbol, {})
-        entry["localSymbol"] = local_symbol
-        if exchange:
-            entry["exchange"] = exchange
-        entry.setdefault("secType", "FUT")
-        entry.setdefault("currency", "USD")
-        data[local_symbol] = entry
-
-        _atomic_write_json(SYMBOL_REGISTRY_PATH, data)
-
-    # From the webhook thread: only fetch trading hours if we don't already have
-    # an entry for *today* for this symbol in symbol_schedules.json.
+    # Only fetch trading hours if we don't already have an entry for *today*
+    # for this symbol in symbol_schedules.json.
     today_key = datetime.utcnow().date().isoformat()
     need_fetch = True
 
@@ -199,17 +183,6 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
             logger.info("[TRADING_HOURS] No tradingHours data yet for symbol %s", local_symbol)
     except Exception as e:
         logger.warning("[TRADING_HOURS] Failed to fill hours for symbol %s: %s", local_symbol, e)
-
-
-def _load_symbol_registry() -> dict:
-    with _symbol_registry_lock:
-        try:
-            if not os.path.exists(SYMBOL_REGISTRY_PATH):
-                return {}
-            with open(SYMBOL_REGISTRY_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
 
 
 def _merge_symbol_schedules(new_data: dict) -> None:
@@ -1479,11 +1452,22 @@ def _weekly_trading_hours_worker():
                 and dtime(1, 0) <= now_utc.time() <= dtime(1, 10)
                 and last_week_key != week_key
             ):
-                symbols = _load_symbol_registry()
+                # Load all symbols we already have in schedules and refresh them.
+                try:
+                    with _symbol_schedule_lock:
+                        if os.path.exists(SYMBOL_SCHEDULE_PATH):
+                            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+                                existing_sched = json.load(f)
+                        else:
+                            existing_sched = {}
+                except Exception:
+                    existing_sched = {}
+
+                symbols = list(existing_sched.keys())
                 if IB_INSTANCE is None or not IB_READY.is_set():
                     logger.warning("[TRADING_HOURS] IB not ready; skipping this run")
                 elif not symbols:
-                    logger.info("[TRADING_HOURS] No symbols in registry yet")
+                    logger.info("[TRADING_HOURS] No symbols in schedules yet")
                 else:
                     async def _job():
                         all_sched: dict[str, dict] = {}
