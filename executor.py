@@ -129,6 +129,49 @@ def _atomic_write_json(path: str, obj: dict) -> None:
     os.replace(tmp, path)
 
 
+# Last webhook per symbol (GLOBAL per host)
+LAST_WEBHOOKS_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "last_webhooks.json",
+)
+_last_webhooks_lock = threading.Lock()
+
+
+def save_last_webhook_for_symbol(local_symbol: str, payload: Dict[str, Any]) -> None:
+    """
+    Always persist the last webhook payload per IB localSymbol so POSTOPEN can
+    re-execute the original ENTRY signal (without relying on signalTimestamp).
+    """
+    if not local_symbol:
+        return
+
+    with _last_webhooks_lock:
+        try:
+            existing: dict = {}
+            if os.path.exists(LAST_WEBHOOKS_PATH):
+                with open(LAST_WEBHOOKS_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            existing[local_symbol] = payload
+            _atomic_write_json(LAST_WEBHOOKS_PATH, existing)
+        except Exception as e:
+            logger.warning("[LAST_WEBHOOKS] Failed saving webhook for %s: %s", local_symbol, e)
+
+
+def load_last_webhook_for_symbol(local_symbol: str) -> Dict[str, Any] | None:
+    if not local_symbol:
+        return None
+    with _last_webhooks_lock:
+        try:
+            if not os.path.exists(LAST_WEBHOOKS_PATH):
+                return None
+            with open(LAST_WEBHOOKS_PATH, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            v = existing.get(local_symbol)
+            return v if isinstance(v, dict) else None
+        except Exception:
+            return None
+
+
 def register_symbol_usage_from_signal(sig: "Signal") -> None:
     """
     From the webhook thread: ensure we have trading-hours data in
@@ -1382,8 +1425,10 @@ def qualify_contract(contract):
 
 async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict:
     """
-    Runs on IB_LOOP: request ContractDetails and parse tradingHours into UTC
-    open/close times keyed by date (YYYY-MM-DD).
+    Runs on IB_LOOP: request ContractDetails and parse tradingHours.
+    tradingHours has only open intervals (no CLOSED; that's in liquidHours).
+    Open/close can fall on different dates (e.g. Sunday only has open).
+    Times stored in contract timeZoneId (no UTC). timeZoneId saved on the symbol.
     """
     c = Future(
         localSymbol=local_symbol,
@@ -1407,105 +1452,44 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
     out: dict[str, dict] = {}
     th_str = getattr(cd, "tradingHours", "") or ""
 
-    # Format per IB docs (example):
-    # "20260315:1700-20260316:1600;20260316:1700-20260317:1600;..."
+    # tradingHours: "20260315:1700-20260316:1600;20260316:1700-20260317:1600;..." (no CLOSED)
     for segment in th_str.split(";"):
         segment = segment.strip()
-        if not segment or ":" not in segment:
+        if not segment or ":" not in segment or "-" not in segment:
             continue
-        # Each segment looks like "YYYYMMDD:HHMM-YYYYMMDD:HHMM[,YYYYMMDD:HHMM-...]"
-        for rng in segment.split(","):
-            rng = rng.strip()
-            if "-" not in rng or ":" not in rng:
-                continue
-            try:
-                start_part, end_part = rng.split("-", 1)
-                start_day, start_time = start_part.split(":", 1)
-                end_day, end_time = end_part.split(":", 1)
-                start_str = f"{start_day}{start_time}"
-                end_str = f"{end_day}{end_time}"
-                start_local = datetime.strptime(start_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
-                end_local = datetime.strptime(end_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
-            except Exception:
-                continue
-
-            date_key = start_local.date().isoformat()
-            start_utc = start_local.astimezone(timezone.utc).isoformat()
-            end_utc = end_local.astimezone(timezone.utc).isoformat()
-
-            d = out.setdefault(date_key, {})
-            if "open" not in d or start_utc < d["open"]:
-                d["open"] = start_utc
-            if "close" not in d or end_utc > d.get("close", ""):
-                d["close"] = end_utc
-
-    return out
-
-
-def _weekly_trading_hours_worker():
-    """
-    Once per week on Sunday ~01:00 UTC, fetch tradingHours for all symbols
-    in the registry and store them into SYMBOL_SCHEDULE_PATH.
-    """
-    last_week_key = None
-
-    while True:
         try:
-            now_utc = datetime.now(timezone.utc)
-            iso_year, iso_week, _ = now_utc.isocalendar()
-            week_key = f"{iso_year}-W{iso_week:02d}"
+            start_part, end_part = segment.split("-", 1)
+            start_part = start_part.strip()
+            end_part = end_part.strip()
+            if ":" not in start_part or ":" not in end_part:
+                continue
+            start_day, start_time = start_part.split(":", 1)
+            end_day, end_time = end_part.split(":", 1)
+            start_str = f"{start_day}{start_time}"
+            end_str = f"{end_day}{end_time}"
+            start_local = datetime.strptime(start_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
+            end_local = datetime.strptime(end_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
+        except Exception:
+            continue
 
-            # Sunday (6) between 01:00 and 01:10 UTC, once per ISO week
-            if (
-                now_utc.weekday() == 6
-                and dtime(1, 0) <= now_utc.time() <= dtime(1, 10)
-                and last_week_key != week_key
-            ):
-                # Load all symbols we already have in schedules and refresh them.
-                try:
-                    with _symbol_schedule_lock:
-                        if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                                existing_sched = json.load(f)
-                        else:
-                            existing_sched = {}
-                except Exception:
-                    existing_sched = {}
+        # Store in local time (timeZoneId), no UTC. Open on start date, close on end date.
+        open_str = start_local.strftime("%Y-%m-%dT%H:%M:%S")
+        close_str = end_local.strftime("%Y-%m-%dT%H:%M:%S")
+        date_open = start_local.date().isoformat()
+        date_close = end_local.date().isoformat()
 
-                symbols = list(existing_sched.keys())
-                if IB_INSTANCE is None or not IB_READY.is_set():
-                    logger.warning("[TRADING_HOURS] IB not ready; skipping this run")
-                elif not symbols:
-                    logger.info("[TRADING_HOURS] No symbols in schedules yet")
-                else:
-                    async def _job():
-                        all_sched: dict[str, dict] = {}
-                        for lsym, info in symbols.items():
-                            try:
-                                sched = await _fetch_trading_hours_for_symbol(lsym, info)
-                                if sched:
-                                    all_sched[lsym] = sched
-                            except Exception as e:
-                                logger.warning("[TRADING_HOURS] Failed for %s: %s", lsym, e)
-                        return all_sched
+        d_open = out.setdefault(date_open, {})
+        if "open" not in d_open or open_str < d_open["open"]:
+            d_open["open"] = open_str
+        d_close = out.setdefault(date_close, {})
+        if "close" not in d_close or close_str > d_close.get("close", ""):
+            d_close["close"] = close_str
 
-                    fut = asyncio.run_coroutine_threadsafe(_job(), IB_LOOP)
-                    try:
-                        new_data = fut.result(timeout=120)
-                        _merge_symbol_schedules(new_data)
-                        logger.info(
-                            "[TRADING_HOURS] Updated schedules for %d symbols (week %s)",
-                            len(new_data),
-                            week_key,
-                        )
-                        last_week_key = week_key
-                    except Exception as e:
-                        logger.warning("[TRADING_HOURS] Scheduler error: %s", e)
-
-        except Exception as e:
-            logger.warning("[TRADING_HOURS] Worker loop error: %s", e)
-
-        time.sleep(60)
+    if not out:
+        return {}
+    result: dict = {"_timeZoneId": tz_name}
+    result.update(out)
+    return result
 
 # ---------------------------
 def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
@@ -1846,21 +1830,58 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
                 f"tp={tp_price} sl={sl_price} entry_avg={entry_avg} "
                 f"use_percentages={use_percentages}"
             )
-            if qty <= 0 or tp_price is None or sl_price is None:
+            if qty <= 0:
                 log_step(
-                    f"[ALARM] Missing TP/SL for conId={conId}; skipping reopen.")
+                    f"[ALARM] Invalid qty for conId={conId} (qty={qty}); skipping reopen.")
                 continue
 
-            open_position_with_brackets(IB_INSTANCE,
-                                        c,
-                                        direction,
-                                        qty,
-                                        take_profit=tp_arg,
-                                        stop_loss=sl_arg,
-                                        target_percentage=None,
-                                        tp_sl_are_multipliers=not use_percentages,
-                                        trade_reason="postopen reopening"
-                                        )
+            # Reopen by re-executing the last ENTRY webhook for this symbol,
+            # but ignore the execution delay (signalTimestamp) by removing it.
+            local_symbol = getattr(c, "localSymbol", None) or getattr(c, "symbol", None)
+            last_payload = load_last_webhook_for_symbol(local_symbol)
+
+            if last_payload:
+                payload_exec = dict(last_payload)
+                # Force correct contract identity + size
+                payload_exec["symbol"] = local_symbol
+                payload_exec["exchange"] = getattr(c, "exchange", payload_exec.get("exchange", ""))
+                payload_exec["qty"] = qty
+                # Ignore latency check in execute_signal_for_account
+                payload_exec.pop("signalTimestamp", None)
+
+                sig_exec = parse_signal(payload_exec)
+                # Force direction/size from the position snapshot
+                sig_exec.desired_direction = direction
+                sig_exec.desired_qty = qty
+                sig_exec.signal_timestamp = None
+
+                # If we were able to compute updated percentages using entry_avg_price,
+                # override TP/SL from the webhook.
+                if use_percentages:
+                    sig_exec.take_profit = tp_arg
+                    sig_exec.stop_loss = sl_arg
+                    sig_exec.risk_valid = (sig_exec.take_profit is not None and sig_exec.stop_loss is not None)
+
+                log_step(
+                    f"[POSTOPEN] Executing saved webhook reopen symbol={local_symbol} "
+                    f"conId={conId} dir={direction} qty={qty} "
+                    f"tp={sig_exec.take_profit} sl={sig_exec.stop_loss} "
+                    f"ignore_latency=True"
+                )
+
+                execute_signal_for_account(IB_INSTANCE, sig_exec, settings, c)
+            """ else:
+                # Fallback to the existing snapshot-based bracket reopen.
+                open_position_with_brackets(IB_INSTANCE,
+                                            c,
+                                            direction,
+                                            qty,
+                                            take_profit=tp_arg,
+                                            stop_loss=sl_arg,
+                                            target_percentage=None,
+                                            tp_sl_are_multipliers=not use_percentages,
+                                            trade_reason="postopen reopening"
+                                            ) """
 
             # time.sleep(1)
 
@@ -2626,8 +2647,12 @@ def webhook() -> Any:
         settings = settings_cache.get()
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         sig = parse_signal(payload)
+        # Always persist the last webhook per IB localSymbol
+        # so POSTOPEN can re-execute the original ENTRY signal.
+        save_last_webhook_for_symbol(sig.symbol, payload)
         # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
-        register_symbol_usage_from_signal(sig)
+        with IB_LOCK:
+            register_symbol_usage_from_signal(sig)
         # logger.info(
         #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 

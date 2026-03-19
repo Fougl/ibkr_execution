@@ -1126,7 +1126,7 @@ def main() -> None:
             cycle_ok = False
             log_exception("Reconcile cycle failed")
 
-        time.sleep(max(5, args.interval))
+        time.sleep(max(60, args.interval))
 
 
 if __name__ == "__main__":
