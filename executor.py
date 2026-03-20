@@ -122,6 +122,10 @@ SYMBOL_SCHEDULE_PATH = os.path.join(
 _symbol_schedule_lock = threading.Lock()
 _symbol_timeline_lock = threading.Lock()
 _symbol_timeline_cache: dict[str, dict] = {}
+SYMBOL_TIMELINE_MONITOR_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "symbol_market_timeline.json"
+)
 MARKET_TIMELINE_MONITOR_PATH = os.path.join(
     os.path.dirname(STATE_PATH),
     "market_timeline_monitor.json"
@@ -790,10 +794,11 @@ def now_in_market_tz(settings: Settings, symbol: str | None = None) -> datetime:
 
 def _market_hours_from_symbol_schedule(start_day: date, fallback_tz: str, symbol: str | None = None):
     """
-    Try to read market open/close from symbol_schedules.json.
-    - First preference: start_day
-    - Fallback: next day(s) that have BOTH open and close
-    Returns tuple: (oh, om, ch, cm, tz_name, used_day) or None
+    Try to read market open/close from symbol_schedules.json for a symbol.
+    Handles both:
+      - same-day open+close
+      - overnight sessions (open on day D, close on day D+1)
+    Returns tuple: (open_dt, close_dt, tz_name) or None
     """
     try:
         with _symbol_schedule_lock:
@@ -803,6 +808,13 @@ def _market_hours_from_symbol_schedule(start_day: date, fallback_tz: str, symbol
                 schedules = json.load(f)
     except Exception:
         return None
+
+    def _to_local_dt(ts: str, tz_name: str):
+        tz = pytz.timezone(tz_name)
+        dt_naive = datetime.fromisoformat(str(ts))
+        if dt_naive.tzinfo is None:
+            return tz.localize(dt_naive)
+        return dt_naive.astimezone(tz)
 
     # Search day = today, then next days
     for day_offset in range(0, 10):
@@ -815,18 +827,28 @@ def _market_hours_from_symbol_schedule(start_day: date, fallback_tz: str, symbol
             day_info = sym_data.get(target_day)
             if not isinstance(day_info, dict):
                 continue
+            tz_name = str(sym_data.get("_timeZoneId") or fallback_tz)
             open_s = day_info.get("open")
             close_s = day_info.get("close")
-            if not open_s or not close_s:
-                continue
             try:
-                oh = int(str(open_s)[11:13])
-                om = int(str(open_s)[14:16])
-                ch = int(str(close_s)[11:13])
-                cm = int(str(close_s)[14:16])
-                tz_name = str(sym_data.get("_timeZoneId") or fallback_tz)
-                used_day = datetime.strptime(target_day, "%Y-%m-%d").date()
-                return oh, om, ch, cm, tz_name, used_day
+                # Case 1: same day has both open and close
+                if open_s and close_s:
+                    open_dt = _to_local_dt(open_s, tz_name)
+                    close_dt = _to_local_dt(close_s, tz_name)
+                    if close_dt > open_dt:
+                        return open_dt, close_dt, tz_name
+
+                # Case 2: overnight session open on D, close on D+1
+                if open_s:
+                    next_day = (start_day + timedelta(days=day_offset + 1)).isoformat()
+                    next_info = sym_data.get(next_day, {})
+                    if isinstance(next_info, dict):
+                        next_close = next_info.get("close")
+                        if next_close:
+                            open_dt = _to_local_dt(open_s, tz_name)
+                            close_dt = _to_local_dt(next_close, tz_name)
+                            if close_dt > open_dt:
+                                return open_dt, close_dt, tz_name
             except Exception:
                 continue
     return None
@@ -846,31 +868,32 @@ def _symbols_with_schedule() -> List[str]:
 
 def market_datetimes(now_local: datetime, settings: Settings, symbol: str | None = None):
     d = now_local.date()
+    from_schedule = False
 
-    # Prefer symbol_schedules.json for open/close (today, or next day with both values).
+    # Prefer symbol_schedules.json for open/close (today, with overnight support).
     sched = _market_hours_from_symbol_schedule(d, settings.timezone, symbol=symbol)
     if sched:
-        oh, om, ch, cm, tz_name, d = sched
-        tz = pytz.timezone(tz_name)
+        open_dt, close_dt, tz_name = sched
+        from_schedule = True
     else:
         tz = pytz.timezone(settings.timezone)
         oh, om = parse_hhmm(settings.market_open)
         ch, cm = parse_hhmm(settings.market_close)
-
-    open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
-    close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
+        open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
+        close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
     
     preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
     reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
 
 
-    if now_local < reopen_dt:
-        open_dt = open_dt - timedelta(days=1)
-        reopen_dt = reopen_dt - timedelta(days=1)
-    
-    if now_local < preclose_dt:
-        close_dt = close_dt - timedelta(days=1)
-        preclose_dt = preclose_dt - timedelta(days=1)
+    if not from_schedule:
+        if now_local < reopen_dt:
+            open_dt = open_dt - timedelta(days=1)
+            reopen_dt = reopen_dt - timedelta(days=1)
+        
+        if now_local < preclose_dt:
+            close_dt = close_dt - timedelta(days=1)
+            preclose_dt = preclose_dt - timedelta(days=1)
 
 
     
@@ -895,7 +918,14 @@ def rebuild_symbol_market_timeline(symbol: str, settings: Settings) -> dict | No
         return None
     try:
         now_local = now_in_market_tz(settings, symbol=symbol)
-        open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=symbol)
+        sched = _market_hours_from_symbol_schedule(now_local.date(), settings.timezone, symbol=symbol)
+        if not sched:
+            return None
+
+        open_dt, close_dt, tz_name = sched
+        preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
+        reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
+
         row = {
             "symbol": symbol,
             "timezone": str(open_dt.tzinfo),
@@ -908,6 +938,12 @@ def rebuild_symbol_market_timeline(symbol: str, settings: Settings) -> dict | No
         all_rows = _load_symbol_timeline()
         all_rows[symbol] = row
         _save_symbol_timeline(all_rows)
+
+        # Monitoring snapshot on disk so you can inspect per-symbol reopen/preclose.
+        try:
+            _atomic_write_json(SYMBOL_TIMELINE_MONITOR_PATH, all_rows)
+        except Exception as e2:
+            logger.warning("[TIMELINE] Failed writing symbol timeline monitor JSON: %s", e2)
         return row
     except Exception as e:
         logger.warning("[TIMELINE] Failed rebuilding symbol timeline for %s: %s", symbol, e)
@@ -2714,7 +2750,12 @@ def webhook() -> Any:
             reopen_dt = datetime.fromisoformat(str(timeline["reopen_dt"]))
             preclose_dt = datetime.fromisoformat(str(timeline["preclose_dt"]))
         else:
-            _, _, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=sig.symbol)
+            logger.info(
+                "[CHECK] GATE trading_hours_unavailable symbol=%s now=%s",
+                sig.symbol, now_local.isoformat()
+            )
+            log_trade_event({"event": "trading_hours_unavailable", "symbol": sig.symbol})
+            return jsonify({"ok": True, "ignored": True, "reason": "trading_hours_unavailable"}), 200
 
         # delay of 1 minute after reopen (custom)
         extra_webhook_delay_min = 1
