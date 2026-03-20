@@ -2588,8 +2588,8 @@ def background_scheduler_loop():
     if not symbols:
         symbols = []
 
-    for sym in symbols:     
-        rebuild_market_timeline(sym,settings)
+    for sym in symbols:
+        rebuild_symbol_market_timeline(sym, settings)
     while True:
         try:
             settings = settings_cache.get()
@@ -2628,8 +2628,8 @@ def background_scheduler_loop():
             if not symbols:
                 symbols = []
 
-            for sym in symbols:     
-                rebuild_market_timeline(sym,settings)
+            for sym in symbols:
+                rebuild_symbol_market_timeline(sym, settings)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
