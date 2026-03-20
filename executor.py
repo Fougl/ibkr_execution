@@ -1615,6 +1615,7 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
     )
 
     details_list = await IB_INSTANCE.reqContractDetailsAsync(c)
+    logger.info(details_list)
     if not details_list:
         return {}
 
