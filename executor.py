@@ -2724,7 +2724,7 @@ def webhook() -> Any:
                 f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
                 f"now={now_local.isoformat()} alert={sig.raw_alert}"
             )
-            og_trade_event({"event": "outside_market_hours_skipping_execution"})
+            log_trade_event({"event": "outside_market_hours_skipping_execution"})
             return jsonify({
                 "ok": True,
                 "ignored": True,
@@ -2797,7 +2797,7 @@ def webhook() -> Any:
         return jsonify({"ok": result["ok"], "result": result}), 200
 
     except Exception as e:
-        log_trade_event({"error": {e}})
+        log_trade_event({"error": str(e)})
         logger.exception(
             f"[ALARM] Webhook handling failed. payload={payload} err={e}")
         return jsonify({"ok": False, "error": str(e)}), 400
