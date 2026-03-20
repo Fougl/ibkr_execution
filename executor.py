@@ -220,15 +220,19 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
 
     try:
         async def _fetch_one():
+            # First attempt: use provided exchange from webhook
             sched = await _fetch_trading_hours_for_symbol(local_symbol, entry)
-            return {local_symbol: sched} if sched else {}
+            if sched:
+                return {local_symbol: sched}
+
+            # Fallback attempt: force CME for futures in case exchange mapping is too specific
+            fallback_entry = dict(entry)
+            fallback_entry["exchange"] = "CME"
+            sched2 = await _fetch_trading_hours_for_symbol(local_symbol, fallback_entry)
+            return {local_symbol: sched2} if sched2 else {}
 
         fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
         new_data = fut.result(timeout=30)
-
-        # Always ensure the schedules file exists, even if no data yet.
-        if not os.path.exists(SYMBOL_SCHEDULE_PATH):
-            _atomic_write_json(SYMBOL_SCHEDULE_PATH, {})
 
         if new_data:
             _merge_symbol_schedules(new_data)
