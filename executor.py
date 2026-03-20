@@ -120,6 +120,12 @@ SYMBOL_SCHEDULE_PATH = os.path.join(
     "symbol_schedules.json"
 )
 _symbol_schedule_lock = threading.Lock()
+_symbol_timeline_lock = threading.Lock()
+_symbol_timeline_cache: dict[str, dict] = {}
+MARKET_TIMELINE_MONITOR_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "market_timeline_monitor.json"
+)
 
 
 def _atomic_write_json(path: str, obj: dict) -> None:
@@ -192,9 +198,9 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
         "currency": "USD",
     }
 
-    # Only fetch trading hours if we don't already have an entry for *today*
-    # for this symbol in symbol_schedules.json.
-    today_key = datetime.utcnow().date().isoformat()
+    # Only fetch trading hours if we don't already have an entry for
+    # (today + 5 days) for this symbol in symbol_schedules.json.
+    target_day_key = (datetime.utcnow().date() + timedelta(days=5)).isoformat()
     need_fetch = True
 
     with _symbol_schedule_lock:
@@ -203,7 +209,7 @@ def register_symbol_usage_from_signal(sig: "Signal") -> None:
                 with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
                     sched_all = json.load(f)
                 sym_sched = sched_all.get(local_symbol, {})
-                if today_key in sym_sched:
+                if target_day_key in sym_sched:
                     need_fetch = False
         except Exception:
             # On any error, fall back to fetching
@@ -248,6 +254,17 @@ def _merge_symbol_schedules(new_data: dict) -> None:
             existing.setdefault(sym, {}).update(sched)
 
         _atomic_write_json(SYMBOL_SCHEDULE_PATH, existing)
+
+
+def _load_symbol_timeline() -> dict:
+    with _symbol_timeline_lock:
+        return dict(_symbol_timeline_cache)
+
+
+def _save_symbol_timeline(data: dict) -> None:
+    with _symbol_timeline_lock:
+        _symbol_timeline_cache.clear()
+        _symbol_timeline_cache.update(data)
 
 
 # Resolve AWS region ONCE at startup
@@ -750,18 +767,91 @@ def parse_hhmm(s: str) -> Tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def now_in_market_tz(settings: Settings) -> datetime:
-    tz = pytz.timezone(settings.timezone)
+def now_in_market_tz(settings: Settings, symbol: str | None = None) -> datetime:
+    tz_name = settings.timezone
+    try:
+        if symbol:
+            with _symbol_schedule_lock:
+                if os.path.exists(SYMBOL_SCHEDULE_PATH):
+                    with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+                        schedules = json.load(f)
+                    sym_data = schedules.get(symbol, {})
+                    if isinstance(sym_data, dict) and sym_data.get("_timeZoneId"):
+                        tz_name = str(sym_data.get("_timeZoneId"))
+    except Exception:
+        pass
+    tz = pytz.timezone(tz_name)
     return datetime.now(tz)
 
 
-def market_datetimes(now_local: datetime, settings: Settings):
-    tz = pytz.timezone(settings.timezone)
+def _market_hours_from_symbol_schedule(start_day: date, fallback_tz: str, symbol: str | None = None):
+    """
+    Try to read market open/close from symbol_schedules.json.
+    - First preference: start_day
+    - Fallback: next day(s) that have BOTH open and close
+    Returns tuple: (oh, om, ch, cm, tz_name, used_day) or None
+    """
+    try:
+        with _symbol_schedule_lock:
+            if not os.path.exists(SYMBOL_SCHEDULE_PATH):
+                return None
+            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+                schedules = json.load(f)
+    except Exception:
+        return None
+
+    # Search day = today, then next days
+    for day_offset in range(0, 10):
+        target_day = (start_day + timedelta(days=day_offset)).isoformat()
+        symbols_iter = [symbol] if symbol and symbol in schedules else list(schedules.keys())
+        for _sym in symbols_iter:
+            sym_data = schedules.get(_sym, {})
+            if not isinstance(sym_data, dict):
+                continue
+            day_info = sym_data.get(target_day)
+            if not isinstance(day_info, dict):
+                continue
+            open_s = day_info.get("open")
+            close_s = day_info.get("close")
+            if not open_s or not close_s:
+                continue
+            try:
+                oh = int(str(open_s)[11:13])
+                om = int(str(open_s)[14:16])
+                ch = int(str(close_s)[11:13])
+                cm = int(str(close_s)[14:16])
+                tz_name = str(sym_data.get("_timeZoneId") or fallback_tz)
+                used_day = datetime.strptime(target_day, "%Y-%m-%d").date()
+                return oh, om, ch, cm, tz_name, used_day
+            except Exception:
+                continue
+    return None
+
+
+def _symbols_with_schedule() -> List[str]:
+    try:
+        with _symbol_schedule_lock:
+            if not os.path.exists(SYMBOL_SCHEDULE_PATH):
+                return []
+            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+                schedules = json.load(f)
+        return [k for k, v in schedules.items() if isinstance(v, dict)]
+    except Exception:
+        return []
+
+
+def market_datetimes(now_local: datetime, settings: Settings, symbol: str | None = None):
     d = now_local.date()
 
-    # Parse HH:MM
-    oh, om = parse_hhmm(settings.market_open)
-    ch, cm = parse_hhmm(settings.market_close)
+    # Prefer symbol_schedules.json for open/close (today, or next day with both values).
+    sched = _market_hours_from_symbol_schedule(d, settings.timezone, symbol=symbol)
+    if sched:
+        oh, om, ch, cm, tz_name, d = sched
+        tz = pytz.timezone(tz_name)
+    else:
+        tz = pytz.timezone(settings.timezone)
+        oh, om = parse_hhmm(settings.market_open)
+        ch, cm = parse_hhmm(settings.market_close)
 
     open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
     close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
@@ -790,6 +880,42 @@ def market_datetimes(now_local: datetime, settings: Settings):
     # )
 
     return open_dt, close_dt, preclose_dt, reopen_dt
+
+
+def rebuild_symbol_market_timeline(symbol: str, settings: Settings) -> dict | None:
+    """
+    Precompute and cache per-symbol market timeline datetimes in memory.
+    Used for fast webhook checks without disk I/O.
+    """
+    if not symbol:
+        return None
+    try:
+        now_local = now_in_market_tz(settings, symbol=symbol)
+        open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=symbol)
+        row = {
+            "symbol": symbol,
+            "timezone": str(open_dt.tzinfo),
+            "open_dt": open_dt.isoformat(),
+            "close_dt": close_dt.isoformat(),
+            "preclose_dt": preclose_dt.isoformat(),
+            "reopen_dt": reopen_dt.isoformat(),
+            "computed_at": now_local.isoformat(),
+        }
+        all_rows = _load_symbol_timeline()
+        all_rows[symbol] = row
+        _save_symbol_timeline(all_rows)
+        return row
+    except Exception as e:
+        logger.warning("[TIMELINE] Failed rebuilding symbol timeline for %s: %s", symbol, e)
+        return None
+
+
+def get_symbol_market_timeline(symbol: str) -> dict | None:
+    if not symbol:
+        return None
+    with _symbol_timeline_lock:
+        row = _symbol_timeline_cache.get(symbol)
+        return dict(row) if isinstance(row, dict) else None
 
 def rebuild_market_timeline(settings: Settings):
     now_local = now_in_market_tz(settings)
@@ -822,6 +948,23 @@ def rebuild_market_timeline(settings: Settings):
             "next_postopen": next_postopen,
         })
 
+    # Monitoring snapshot: write current timeline to JSON for quick inspection.
+    try:
+        monitor = {
+            "updated_at": datetime.utcnow().isoformat(),
+            "prev_open": prev_open.isoformat(),
+            "prev_close": prev_close.isoformat(),
+            "next_open": next_open.isoformat(),
+            "next_close": next_close.isoformat(),
+            "prev_preclose": prev_preclose.isoformat(),
+            "next_preclose": next_preclose.isoformat(),
+            "prev_postopen": prev_postopen.isoformat(),
+            "next_postopen": next_postopen.isoformat(),
+        }
+        _atomic_write_json(MARKET_TIMELINE_MONITOR_PATH, monitor)
+    except Exception as e:
+        logger.warning("[TIMELINE] Failed writing monitor JSON: %s", e)
+
 
 # def in_trading_window(now_local: datetime, settings: Settings) -> bool:
 #     """
@@ -844,14 +987,9 @@ def rebuild_market_timeline(settings: Settings):
 
 #     return ok
 
-def in_trading_window(now_local):
-
-    with _market_times_lock:
-        next_preclose = _market_times["next_preclose"]
-        #prev_postopen = _market_times["prev_postopen"]
-        next_postopen = _market_times["next_postopen"]
-
-    return  next_preclose<next_postopen
+def in_trading_window(now_local: datetime, settings: Settings, symbol: str) -> bool:
+    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=symbol)
+    return reopen_dt <= now_local <= preclose_dt
 
 
 def within_preclose_window(now_local: datetime, settings: Settings) -> bool:
@@ -1492,8 +1630,9 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
     return result
 
 # ---------------------------
-def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
-    now_local = now_in_market_tz(settings)
+def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings, symbol_filter: str | None = None) -> None:
+    now_local = now_in_market_tz(settings, symbol=symbol_filter)
+    state_account_key = str(ACCOUNT_SHORT_NAME) if not symbol_filter else f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
 
     dayk = state_key_for_day(now_local.date())
 
@@ -1515,7 +1654,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
             already = bool(
                 st.get("preclose", {})
                   .get(dayk, {})
-                  .get(str(ACCOUNT_SHORT_NAME), {})
+                  .get(state_account_key, {})
                   .get("done", False)
             )
         # if already:
@@ -1523,6 +1662,12 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
 
         # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
         pos = IB_INSTANCE.positions()
+        if symbol_filter:
+            pos = [
+                p for p in pos
+                if getattr(getattr(p, "contract", None), "localSymbol", None) == symbol_filter
+                or getattr(getattr(p, "contract", None), "symbol", None) == symbol_filter
+            ]
 
         
 
@@ -1655,7 +1800,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
             st = load_state()
             st.setdefault("preclose", {})
             st["preclose"].setdefault(dayk, {})
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)] = {
+            st["preclose"][dayk][state_account_key] = {
                 "done": True,
                 "at": now_local.isoformat(),
                 "snapshot": snapshot,
@@ -1675,16 +1820,18 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
         flush_account_log("PRECLOSE_EXEC")
 
 
-def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
+def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_filter: str | None = None) -> None:
+    state_account_key = str(ACCOUNT_SHORT_NAME) if not symbol_filter else f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
 
     # now_local = now_in_market_tz(settings)
 
     # dayk = state_key_for_day(now_local.date())
     
-    now_local = now_in_market_tz(settings)
+    now_local = now_in_market_tz(settings, symbol=symbol_filter)
 
     #open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
-    state_day=_market_times["prev_close"].date()
+    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=symbol_filter)
+    state_day = close_dt.date()
     # --------------------------------------------------
     # FIX: determine correct state day
     # --------------------------------------------------
@@ -1708,7 +1855,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
         with _state_lock:
             st = load_state()
             entry = st.get("preclose", {}).get(
-                dayk, {}).get(str(ACCOUNT_SHORT_NAME))
+                dayk, {}).get(state_account_key)
 
         # must have preclose + not already reopened
         if not entry:
@@ -1775,6 +1922,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
             action = "BUY" if int(meta.get("position", 0)) > 0 else "SELL"
             qty = abs(int(meta.get("position", 0)))
             qty2 = int(meta.get("position", 0))
+            if symbol_filter and getattr(c, "localSymbol", None) != symbol_filter and getattr(c, "symbol", None) != symbol_filter:
+                continue
             log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
 
             # ------------------------------
@@ -1890,8 +2039,8 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
         # Mark reopen done
         with _state_lock:
             st = load_state()
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_done"] = True
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)
+            st["preclose"][dayk][state_account_key]["reopen_done"] = True
+            st["preclose"][dayk][state_account_key
                                  ]["reopen_at"] = now_local.isoformat()
             save_state(st)
 
@@ -2435,155 +2584,52 @@ def background_scheduler_loop():
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
     settings = settings_cache.get()
-    rebuild_market_timeline(settings)
+    symbols = _symbols_with_schedule()
+    if not symbols:
+        symbols = []
+
+    for sym in symbols:     
+        rebuild_market_timeline(sym,settings)
     while True:
         try:
             settings = settings_cache.get()
             now_local = now_in_market_tz(settings)
 
-            #rebuild_market_timeline(settings)
+            
 
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
+            symbols = _symbols_with_schedule()
+            if not symbols:
+                symbols = []
 
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
+            for sym in symbols:
+                now_sym = now_in_market_tz(settings, symbol=sym)
+                _, _, preclose_dt, reopen_dt = market_datetimes(now_sym, settings, symbol=sym)
+ 
 
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
+                # PRE-CLOSE per symbol
+                if preclose_dt <= now_sym:
+                    logger.info("Triggering pre-close ensure symbol=%s", sym)
+                    if IB_INSTANCE and IB_INSTANCE.isConnected():
+                        with IB_LOCK:
+                            ensure_preclose_close_if_needed(IB_INSTANCE, settings, symbol_filter=sym)
+                    else:
+                        logger.info("[ALARM] Preclose: IB not able to connected")
 
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
+                # POST-OPEN per symbol
+                if reopen_dt <= now_sym and settings.post_open_min:
+                    logger.info("Triggering post-open ensure symbol=%s", sym)
+                    if IB_INSTANCE and IB_INSTANCE.isConnected():
+                        with IB_LOCK:
+                            ensure_postopen_reopen_if_needed(IB_INSTANCE, settings, symbol_filter=sym)
+                    else:
+                        logger.info("[ALARM] Postopen: IB not able to connected")
 
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
+            symbols = _symbols_with_schedule()
+            if not symbols:
+                symbols = []
 
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
-
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            #rebuild_market_timeline(settings)
-
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
-
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
-
-            # market_day = open_dt.date()
-
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
-
-            # ==========================================
-            # PRE-CLOSE WINDOW — run ONCE per market day
-            # ==========================================
-            if _market_times["next_preclose"] <= now_local:
-                logger.info(
-                    "Triggering pre-close ensure")
-                #IB_INSTANCE = connect_ib_for_webhook()
-                if IB_INSTANCE and IB_INSTANCE.isConnected():
-                    with IB_LOCK:
-                        ensure_preclose_close_if_needed(IB_INSTANCE, settings)
-
-                    #IB_INSTANCE.disconnect()
-                    #logger.info("[IB] Clean disconnect after preclose")
-                else:
-                    logger.info(
-                        "[ALARM] Preclose: IB not able to connected")
-
-            # ==========================================
-            # POST-OPEN WINDOW — run ONCE per market day
-            # ==========================================
-            if _market_times["next_postopen"] <= now_local and settings.post_open_min:
-                logger.info(
-                    "Triggering post-open ensure")
-
-                #IB_INSTANCE = connect_ib_for_webhook()
-                if IB_INSTANCE and IB_INSTANCE.isConnected():
-                    with IB_LOCK:
-                        ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
-                    #IB_INSTANCE.disconnect()
-                    #logger.info("[IB] Clean disconnect after postopen")
-                else:
-                    logger.info(
-                        "[ALARM] Postopen: IB not able to connected")
-
-                    
-            rebuild_market_timeline(settings)
+            for sym in symbols:     
+                rebuild_market_timeline(sym,settings)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
@@ -2656,12 +2702,19 @@ def webhook() -> Any:
         # logger.info(
         #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
-        now_local = now_in_market_tz(settings)
-        #open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+        now_local = now_in_market_tz(settings, symbol=sig.symbol)
+        timeline = get_symbol_market_timeline(sig.symbol)
+        if timeline is None:
+            timeline = rebuild_symbol_market_timeline(sig.symbol, settings)
+        if timeline:
+            reopen_dt = datetime.fromisoformat(str(timeline["reopen_dt"]))
+            preclose_dt = datetime.fromisoformat(str(timeline["preclose_dt"]))
+        else:
+            _, _, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=sig.symbol)
 
         # delay of 1 minute after reopen (custom)
         extra_webhook_delay_min = 1
-        webhook_allowed_dt = _market_times["prev_postopen"] + timedelta(minutes=extra_webhook_delay_min)
+        webhook_allowed_dt = reopen_dt + timedelta(minutes=extra_webhook_delay_min)
         if now_local < webhook_allowed_dt:
             logger.info(
                 f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
@@ -2675,10 +2728,10 @@ def webhook() -> Any:
                 "allowed_after": webhook_allowed_dt.isoformat()
             }), 200
 
-        # market hours gating
-        if not in_trading_window(now_local):
+        # market hours gating (use cached/precomputed symbol timeline)
+        if not (reopen_dt <= now_local <= preclose_dt):
             logger.info(
-                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['next_postopen']} close={_market_times['next_preclose']} ")
+                f"[CHECK] GATE outside_market_hours symbol={sig.symbol} now={now_local.isoformat()} open={reopen_dt.isoformat()} close={preclose_dt.isoformat()} ")
             logger.info(
                 f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
             log_trade_event({"event": "outside_market_hours_skipping_execution"})
