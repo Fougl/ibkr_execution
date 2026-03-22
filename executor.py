@@ -344,13 +344,8 @@ def _symbol_sessions_from_schedule_fallback(symbol: str, fallback_tz: str) -> Li
     return sessions
 
 
-async def _fetch_contract_sessions_async(local_symbol: str, exchange_hint: str, fallback_tz: str) -> List[Tuple[datetime, datetime, str]]:
-    c = Future(
-        localSymbol=local_symbol,
-        exchange=exchange_hint or "CME",
-        currency="USD",
-    )
-    details_list = await IB_INSTANCE.reqContractDetailsAsync(c)
+async def _fetch_contract_sessions_async(contract: Contract, fallback_tz: str) -> List[Tuple[datetime, datetime, str]]:
+    details_list = await IB_INSTANCE.reqContractDetailsAsync(contract)
     if not details_list:
         return []
     cd = details_list[0]
@@ -393,25 +388,28 @@ def _symbol_sessions_from_contract_details(symbol: str, fallback_tz: str) -> Lis
     if cached and (now_ts - float(cached.get("fetched_at", 0.0))) <= CONTRACT_SESSIONS_TTL_SEC:
         return list(cached.get("sessions", []))
 
-    exchanges = []
-    hint = _symbol_exchange_hints.get(symbol)
-    if hint:
-        exchanges.append(hint)
-    exchanges.extend(["CME", "GLOBEX"])
+    ex = (_symbol_exchange_hints.get(symbol) or "").strip()
+    if not ex:
+        payload = load_last_webhook_for_symbol(symbol)
+        if isinstance(payload, dict):
+            ex = str(payload.get("exchange", "")).strip().split("_")[0].strip()
+    if not ex:
+        logger.warning(
+            "[CONTRACT_SESSIONS] No exchange for symbol=%s; need webhook exchange for reqContractDetails",
+            symbol,
+        )
+        return []
 
+    contract = build_contract_for_symbol_exchange(symbol, ex)
     sessions: List[Tuple[datetime, datetime, str]] = []
-    for ex in exchanges:
-        try:
-            fut = asyncio.run_coroutine_threadsafe(
-                _fetch_contract_sessions_async(symbol, ex, fallback_tz),
-                IB_LOOP,
-            )
-            got = fut.result(timeout=10)
-            if got:
-                sessions = got
-                break
-        except Exception:
-            continue
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _fetch_contract_sessions_async(contract, fallback_tz),
+            IB_LOOP,
+        )
+        sessions = fut.result(timeout=10) or []
+    except Exception as e:
+        logger.warning("[CONTRACT_SESSIONS] reqContractDetails failed symbol=%s: %s", symbol, e)
 
     if sessions:
         _contract_sessions_cache[symbol] = {"fetched_at": now_ts, "sessions": sessions}
@@ -1339,6 +1337,19 @@ class Signal:
     risk_valid: bool | None = None
 
 
+def build_contract_for_symbol_exchange(local_symbol: str, exchange: str) -> Contract:
+    """Same `Future` as `build_contract` — use for scheduler / tradingHours without a full webhook alert."""
+    return build_contract(
+        Signal(
+            symbol=local_symbol,
+            exchange=exchange,
+            desired_direction=0,
+            desired_qty=1,
+            raw_alert="contract_hours",
+        )
+    )
+
+
 def parse_signal(payload: Dict[str, Any]) -> Signal:
     import re
     alert = str(payload.get("alert", "")).strip()
@@ -1841,10 +1852,9 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
     Open/close can fall on different dates (e.g. Sunday only has open).
     Times stored in contract timeZoneId (no UTC). timeZoneId saved on the symbol.
     """
-    c = Future(
-        localSymbol=local_symbol,
-        exchange=info.get("exchange", "CME"),
-        currency=info.get("currency", "USD"),
+    c = build_contract_for_symbol_exchange(
+        local_symbol,
+        str(info.get("exchange") or "CME"),
     )
 
     details_list = await IB_INSTANCE.reqContractDetailsAsync(c)
