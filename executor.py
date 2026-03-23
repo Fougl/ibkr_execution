@@ -473,7 +473,8 @@ def refresh_symbol_next_window(
     """
     Per-symbol cache with only:
     - next_postopen (open + post_open_min, possibly from next session if already passed)
-    - next_preclose (close - pre_close_min of first non-closed session)
+    - next_preclose (close - pre_close_min of idx session; if now already past that time,
+      use sessions[1] close — IB first segment can be stale)
     - timezone
     """
     if not symbol:
@@ -505,6 +506,8 @@ def refresh_symbol_next_window(
 
     sess_open, sess_close, tz_name = sessions[idx]
     next_preclose = sess_close - pre_delta
+    if len(sessions) >= 2 and now_local > next_preclose:
+        next_preclose = sessions[1][1] - pre_delta
     curr_postopen = sess_open + post_delta
 
     if now_local > curr_postopen and idx + 1 < len(sessions):
@@ -2444,7 +2447,7 @@ def background_scheduler_loop():
  
 
                 # PRE-CLOSE per symbol
-                if preclose_dt <= now_sym and settings.post_open_min:
+                if preclose_dt <= now_sym:
                     logger.info("Triggering pre-close ensure symbol=%s", sym)
                     if IB_INSTANCE and IB_INSTANCE.isConnected():
                         with IB_LOCK:
@@ -2456,7 +2459,7 @@ def background_scheduler_loop():
                 # NOTE: next_postopen already includes post_open_min; do not gate on
                 # settings.post_open_min here — when it is 0, "and settings.post_open_min"
                 # was falsy and post-open never ran.
-                if reopen_dt <= now_sym:
+                if reopen_dt <= now_sym and settings.post_open_min:
                     logger.info("Triggering post-open ensure symbol=%s", sym)
                     if IB_INSTANCE and IB_INSTANCE.isConnected():
                         with IB_LOCK:
@@ -2469,8 +2472,7 @@ def background_scheduler_loop():
                 symbols = []
 
             for sym, ex in symbols:
-                if USE_SYMBOL_NEXT_WINDOW_CACHE:
-                    refresh_symbol_next_window(sym, settings, exchange=ex)
+                refresh_symbol_next_window(sym, settings, exchange=ex)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
