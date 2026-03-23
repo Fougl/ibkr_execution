@@ -1902,12 +1902,18 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
         return
 
     log_step("Postopen potential position reopen")
+    log_trade_event(
+                {
+                    "event": "postopen_reopen"
+                }
+    )    
     try:
 
         local_symbol = str(symbol_filter).strip()
         last_payload = load_last_webhook_for_symbol(local_symbol)
         if not last_payload:
             log_step(f"[POSTOPEN] No saved webhook for symbol={local_symbol!r}")
+            log_trade_event({"event": "nothing_to_reopen"})
             return
         log_trade_event(last_payload)
         sig_exec = parse_signal(last_payload)
