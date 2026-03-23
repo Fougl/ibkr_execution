@@ -2229,7 +2229,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
             log_step(
                 "[EXEC] Same direction position already opened. Skipping execution")
-)
+
             result.update(
                 {"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
             flush_account_log("WEBHOOK_EXEC")
@@ -2509,7 +2509,99 @@ def webhook() -> Any:
     global IB_INSTANCE
     logger.info("===HTTP /webhook received")
 
-    
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+    except Exception:
+        payload = {}
+
+    # Trades log: whole webhook as single JSON line (multiline start with {)
+    log_trade_event(payload)
+
+    try:
+        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        settings = settings_cache.get()
+        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        sig = parse_signal(payload)
+        # Always persist the last webhook per IB localSymbol
+        # so POSTOPEN can re-execute the original ENTRY signal.
+        save_last_webhook_for_symbol(sig.symbol, payload)
+        # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
+        #with IB_LOCK:
+        symbol_was_new = register_symbol_usage_from_signal(sig)
+        # logger.info(
+        #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
+
+        now_local = now_in_market_tz(settings, symbol=sig.symbol)
+        ex = getattr(sig, "exchange", None)
+        if USE_SYMBOL_NEXT_WINDOW_CACHE:
+            # Only call refresh_symbol_next_window on first-seen symbol; otherwise use next-window cache.
+            if symbol_was_new is True:
+                row = refresh_symbol_next_window(sig.symbol, settings, now_local, exchange=ex)
+            if not row:
+                logger.info(
+                    "[CHECK] GATE trading_hours_unavailable symbol=%s now=%s",
+                    sig.symbol, now_local.isoformat()
+                )
+                log_trade_event({"event": "trading_hours_unavailable", "symbol": sig.symbol})
+                return jsonify({"ok": True, "ignored": True, "reason": "trading_hours_unavailable"}), 200
+            reopen_dt = row["next_postopen"]
+            preclose_dt = row["next_preclose"]
+        
+
+
+        # market hours gating (cache-based new logic, legacy fallback preserved above)
+        if preclose_dt > reopen_dt:
+            logger.info(
+                f"[CHECK] GATE outside_market_hours symbol={sig.symbol} now={now_local.isoformat()} "
+                f"next_postopen={reopen_dt.isoformat()} next_preclose={preclose_dt.isoformat()} "
+            )
+            logger.info(
+                f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+            log_trade_event({"event": "outside_market_hours_skipping_execution"})
+            return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
+
+
+        if not IB_INSTANCE or not IB_INSTANCE.isConnected():
+            logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
+            return jsonify({"ok": False, "error": "ib_not_connected"}), 503
+        with IB_LOCK:
+            contract = build_contract(sig)
+            qualified = qualify_contract(contract)
+
+            result=None
+            if not qualified or len(qualified) != 1:
+                log_step(
+                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                    f"qualified_count={len(qualified)}"
+                )
+
+                result.update({
+                    "ok": True,
+                    "action": "skipped_ambiguous_contract",                # INFO: early return
+
+                    "reason": "ambiguous_contract",
+                    "qualified_count": len(qualified)
+                })
+                flush_account_log("WEBHOOK_EXEC")
+            else:
+                result = execute_signal_for_account(IB_INSTANCE, sig, settings,contract)
+                qty = current_position_qty(IB_INSTANCE, contract)
+                trades = IB_INSTANCE.openTrades()
+                filtered = []
+                for t in trades:
+                    try:
+                        if t.contract and t.contract.conId == contract.conId:
+                            filtered.append(t)
+                    except:
+                        continue
+                log_trade_event({"positions_after_webhook_execution": abs(qty), "orders_after_webhook_execution": len(filtered)})
+        return jsonify({"ok": result["ok"], "result": result}), 200
+
+    except Exception as e:
+        log_trade_event({"error": str(e)})
+        logger.exception(
+            f"[ALARM] Webhook handling failed. payload={payload} err={e}")
+        return jsonify({"ok": False, "error": str(e)}), 400
     #finally:
         # 🔥 CRITICAL — disconnect exactly once
         # try:
