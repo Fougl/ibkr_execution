@@ -1906,7 +1906,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
         if not last_payload:
             log_step(f"[POSTOPEN] No saved webhook for symbol={local_symbol!r}")
             return
-
+        log_trade_event(last_payload)
         sig_exec = parse_signal(last_payload)
         sig_exec.desired_direction = direction
         sig_exec.desired_qty = qty if qty > 0 else sig_exec.desired_qty
@@ -1928,6 +1928,7 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
                 )
                 flush_account_log("POSTOPEN_EXEC")
                 return
+            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
             execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
             qty_pos = current_position_qty(IB_INSTANCE, contract)
             trades = IB_INSTANCE.openTrades()
@@ -2125,11 +2126,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                        )
                 log_step("No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
-                # pos=len(IB_INSTANCE.positions())
-                # orders=len(IB_INSTANCE.openTrades())
-                # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+ 
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2153,13 +2150,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                    reason="exit_signal",
                                    contract=contract
                                    )
-            # pos=len(IB_INSTANCE.positions())
-            # orders=len(IB_INSTANCE.openTrades())
-            # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+
             log_step("Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
+
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -2179,26 +2173,19 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
 
                     result.update(
                         {"ok": False, "action": "exit_failed_after_retry"})
-                    # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                    # IB_INSTANCE.disconnect()
-                    # pos=len(IB_INSTANCE.positions())
-                    # orders=len(IB_INSTANCE.openTrades())
-                    # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_long", contract=contract)
                 result.update({"ok": True, "action": "exit_long_closed"})
-                # pos=len(IB_INSTANCE.positions())
-                # orders=len(IB_INSTANCE.openTrades())
-                # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
                 result.update(
                     {"ok": True, "action": "exit_long_no_long_position"})
 
-                #log_trade_event({"event": "no_long_postions_opened"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2214,24 +2201,16 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 close_position(IB_INSTANCE, contract, qty)
                 if not wait_until_flat(IB_INSTANCE, contract, settings):
                     log_step("[ALARM] Exit close not reflected — retrying")
-                    # close_position(contract, qty)
-                    # time.sleep(1)
+
 
                     result.update(
                         {"ok": False, "action": "exit_failed_after_retry"})
-                    # pos=len(IB_INSTANCE.positions())
-                    # orders=len(IB_INSTANCE.openTrades())
-                    # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
-                    # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                    # IB_INSTANCE.disconnect()
+
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_short", contract=contract)
                 result.update({"ok": True, "action": "exit_short_closed"})
-                # pos=len(IB_INSTANCE.positions())
-                # orders=len(IB_INSTANCE.openTrades())
-                #log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
@@ -2250,19 +2229,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
             log_step(
                 "[EXEC] Same direction position already opened. Skipping execution")
-            # pos=len(IB_INSTANCE.positions())
-            # orders=len(IB_INSTANCE.openTrades())
-            #log_trade_event({"event": "same_position_already_open_skipping", "positions_already_opened": pos, "orders_alreay_opened": orders})
+)
             result.update(
                 {"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
 
-        # ----------------------------------------------------------
-        # REVERSAL (close ALWAYS, but entry obeys latency)
-        # ----------------------------------------------------------
+
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step(
                 f"[EXEC] Opposite direction singal: Closing position and opening new one.")
