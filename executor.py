@@ -2613,7 +2613,112 @@ def webhook() -> Any:
     global IB_INSTANCE
     logger.info("===HTTP /webhook received")
 
-    
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+    except Exception:
+        payload = {}
+
+    # Trades log: whole webhook as single JSON line (multiline start with {)
+    log_trade_event(payload)
+
+    try:
+        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        settings = settings_cache.get()
+        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        sig = parse_signal(payload)
+        # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
+        register_symbol_usage_from_signal(sig)
+        # logger.info(
+        #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
+
+        now_local = now_in_market_tz(settings)
+        #open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
+
+        # delay of 1 minute after reopen (custom)
+        extra_webhook_delay_min = 1
+        webhook_allowed_dt = _market_times["prev_postopen"] + timedelta(minutes=extra_webhook_delay_min)
+        if now_local < webhook_allowed_dt:
+            logger.info(
+                f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
+                f"now={now_local.isoformat()} alert={sig.raw_alert}"
+            )
+            og_trade_event({"event": "outside_market_hours_skipping_execution"})
+            return jsonify({
+                "ok": True,
+                "ignored": True,
+                "reason": "webhook_wait_reopen_delay",
+                "allowed_after": webhook_allowed_dt.isoformat()
+            }), 200
+
+        # market hours gating
+        if not in_trading_window(now_local):
+            logger.info(
+                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['next_postopen']} close={_market_times['next_preclose']} ")
+            logger.info(
+                f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+            log_trade_event({"event": "outside_market_hours_skipping_execution"})
+            return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
+
+        # if within_preclose_window(now_local, settings):
+        #     logger.info(
+        #         f"[CHECK] GATE within_preclose_window now={now_local.isoformat()}")
+        #     logger.info(
+        #         f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
+        #     return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
+
+        #IB_INSTANCE = connect_ib_for_webhook()
+        if not IB_INSTANCE or not IB_INSTANCE.isConnected():
+            logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
+            return jsonify({"ok": False, "error": "ib_not_connected"}), 503
+        with IB_LOCK:
+            contract = build_contract(sig)
+            #logger.info(f"{contract}")
+            # Qualify contract and detect ambiguity
+            qualified = qualify_contract(contract)
+            # qualified = True
+            # logger.info(f"two")
+            # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
+
+            # If 0 or more than 1 contract returned → ambiguous
+            result=None
+            if not qualified or len(qualified) != 1:
+                log_step(
+                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                    f"qualified_count={len(qualified)}"
+                )
+                # logger.info(
+                #     f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
+                #     f"qualified_count={len(qualified)}"
+                # )
+                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
+                # IB_INSTANCE.disconnect()
+                result.update({
+                    "ok": True,
+                    "action": "skipped_ambiguous_contract",                # INFO: early return
+
+                    "reason": "ambiguous_contract",
+                    "qualified_count": len(qualified)
+                })
+                flush_account_log("WEBHOOK_EXEC")
+            else:
+                result = execute_signal_for_account(IB_INSTANCE, sig, settings,contract)
+                qty = current_position_qty(IB_INSTANCE, contract)
+                trades = IB_INSTANCE.openTrades()
+                filtered = []
+                for t in trades:
+                    try:
+                        if t.contract and t.contract.conId == contract.conId:
+                            filtered.append(t)
+                    except:
+                        continue
+                log_trade_event({"positions_after_webhook_execution": abs(qty), "orders_after_webhook_execution": len(filtered)})
+        return jsonify({"ok": result["ok"], "result": result}), 200
+
+    except Exception as e:
+        log_trade_event({"error": {e}})
+        logger.exception(
+            f"[ALARM] Webhook handling failed. payload={payload} err={e}")
+        return jsonify({"ok": False, "error": str(e)}), 400
     #finally:
         # 🔥 CRITICAL — disconnect exactly once
         # try:
