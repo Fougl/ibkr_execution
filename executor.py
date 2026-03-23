@@ -1928,7 +1928,6 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
                 )
                 flush_account_log("POSTOPEN_EXEC")
                 return
-            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
             execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
             qty_pos = current_position_qty(IB_INSTANCE, contract)
             trades = IB_INSTANCE.openTrades()
