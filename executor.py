@@ -227,6 +227,26 @@ def load_last_webhook_for_symbol(local_symbol: str) -> Dict[str, Any] | None:
             return None
 
 
+def delete_last_webhook_for_symbol(local_symbol: str) -> None:
+    """Remove persisted last webhook for this IB localSymbol (e.g. flat before preclose)."""
+    if not local_symbol:
+        return
+    with _last_webhooks_lock:
+        try:
+            existing: dict = {}
+            if os.path.exists(LAST_WEBHOOKS_PATH):
+                with open(LAST_WEBHOOKS_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            if not isinstance(existing, dict):
+                existing = {}
+            if local_symbol not in existing:
+                return
+            del existing[local_symbol]
+            _atomic_write_json(LAST_WEBHOOKS_PATH, existing)
+        except Exception as e:
+            logger.warning("[LAST_WEBHOOKS] Failed deleting webhook for %s: %s", local_symbol, e)
+
+
 def _upsert_known_symbol(local_symbol: str, exchange: str | None) -> bool:
     """
     Update in-memory known-symbols cache and persist KNOWN_SYMBOLS_PATH.
@@ -1711,6 +1731,11 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings, symbol_filt
                 if getattr(getattr(p, "contract", None), "localSymbol", None) == symbol_filter
                 or getattr(getattr(p, "contract", None), "symbol", None) == symbol_filter
             ]
+            if not any(int(getattr(p, "position", 0) or 0) != 0 for p in pos):
+                delete_last_webhook_for_symbol(symbol_filter)
+                log_step(
+                    f"Preclose: no open position for symbol={symbol_filter}; removed last_webhooks entry"
+                )
 
         
 
@@ -1864,240 +1889,64 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings, symbol_filt
 
 
 def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_filter: str | None = None) -> None:
-    state_account_key = str(ACCOUNT_SHORT_NAME) if not symbol_filter else f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
-
-    # now_local = now_in_market_tz(settings)
-
-    # dayk = state_key_for_day(now_local.date())
-    
-    now_local = now_in_market_tz(settings, symbol=symbol_filter)
-
-    #open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
-    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=symbol_filter)
-    state_day = close_dt.date()
-    # --------------------------------------------------
-    # FIX: determine correct state day
-    # --------------------------------------------------
-    # if open_dt < close_dt:
-    #     # normal daytime session
-    #     state_day = now_local.date()
-    # else:
-    #     # overnight session → snapshot stored on previous day
-    #     state_day = (now_local - timedelta(days=1)).date()
-    dayk = state_key_for_day(state_day)
-
-    # Ensure persistent global IB connection is alive
-    # if not IB_INSTANCE or not IB_INSTANCE.isConnected():
-    #     logger.info("[ALARM] Global IB_INSTANCE is not connected")
-    #     flush_account_log("POSTOPEN_EXEC")
-    #     return
-    # return jsonify({"ok": False, "error": "ib_not_connected"}), 503
+    """
+    Re-run the saved ENTRY webhook for this symbol: load_last_webhook_for_symbol → parse_signal,
+    then same contract path as /webhook (build_contract → qualify_contract → execute_signal_for_account).
+    Does not write state (no reopen_done / save_state here).
+    """
+    if not symbol_filter:
+        log_step("[POSTOPEN] skipped: no symbol_filter")
+        return
 
     log_step("Postopen potential position reopen")
     try:
-        with _state_lock:
-            st = load_state()
-            entry = st.get("preclose", {}).get(
-                dayk, {}).get(state_account_key)
 
-        # must have preclose + not already reopened
-        if not entry:
-            log_step("Nothing to reopen")
-            return
-        if entry.get("reopen_done"):# or entry.get("done"):
-            log_step("Postopen was already triggered")
+        local_symbol = str(symbol_filter).strip()
+        last_payload = load_last_webhook_for_symbol(local_symbol)
+        if not last_payload:
+            log_step(f"[POSTOPEN] No saved webhook for symbol={local_symbol!r}")
             return
 
-        snapshot: Dict[str, Any] = entry.get("snapshot", {}) or {}
-        orders_snapshot: List[Dict[str, Any]] = entry.get(
-            "orders_snapshot", []) or []
+        sig_exec = parse_signal(last_payload)
+        sig_exec.desired_direction = direction
+        sig_exec.desired_qty = qty if qty > 0 else sig_exec.desired_qty
+        sig_exec.signal_timestamp = None
 
-        # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
+        log_step(
+            f"[POSTOPEN] saved webhook reopen symbol={local_symbol} dir={direction} qty={sig_exec.desired_qty} "
+            f"tp={sig_exec.take_profit} sl={sig_exec.stop_loss}"
+        )
 
-        # must be flat right now
-        any_open = any(int(p.position) != 0 for p in IB_INSTANCE.positions())
-        if any_open:
-            log_step(
-                f"[ALARM] Postopen: acct={ACCOUNT_SHORT_NAME} not flat; will not reopen.")
-            # IB_INSTANCE.disconnect()
-            return
-
-        # no snapshot → mark done
-        if not snapshot:
-            with _state_lock:
-                st = load_state()
-                st["preclose"][dayk][str(
-                    ACCOUNT_SHORT_NAME)]["reopen_done"] = True
-                st["preclose"][dayk][str(
-                    ACCOUNT_SHORT_NAME)]["reopen_at"] = now_local.isoformat()
-                save_state(st)
-            log_step(
-                f"Postopen: acct={ACCOUNT_SHORT_NAME} nothing to reopen (empty snapshot).")
-            # IB_INSTANCE.disconnect()
-            return
-
-        # =====================================================
-        # MAIN LOOP — rebuild original contracts using conId
-        # =====================================================
-        for conId_key, meta in snapshot.items():
-
-            # conId is stored as dict key
-            try:
-                conId = int(conId_key)
-            except:
+        with IB_LOCK:
+            contract = build_contract(sig_exec)
+            qualified = qualify_contract(contract)
+            nq = len(qualified) if qualified else 0
+            if not qualified or nq != 1:
                 log_step(
-                    f"[ALARM][POSTOPEN] Invalid conId key={conId_key}, skipping.")
-                continue
-
-            # Build by conId (BEST POSSIBLE METHOD)
-            c = Contract()
-            c.conId = conId
-
-            try:
-                qc = qualify_contract(c)
-                if qc:
-                    c = qc[0]   # fully qualified contract
-            except Exception as e:
-                log_step(
-                    f"[ALARM][POSTOPEN] qualify failed conId={conId}: {e}")
-            #log_trade_event({"postopen reopen for symbol": c.localSymbol, "orders_after_trade_execution": orders})
-            direction = +1 if int(meta.get("position", 0)) > 0 else -1
-            action = "BUY" if int(meta.get("position", 0)) > 0 else "SELL"
-            qty = abs(int(meta.get("position", 0)))
-            qty2 = int(meta.get("position", 0))
-            if symbol_filter and getattr(c, "localSymbol", None) != symbol_filter and getattr(c, "symbol", None) != symbol_filter:
-                continue
-            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
-
-            # ------------------------------
-            # Match TP/SL from snapshot
-            # ------------------------------
-            tp_price = None
-            sl_price = None
-
-            for om in orders_snapshot:
-                if om.get("conId") != conId:
-                    continue
-
-                ot = om.get("orderType")
-                lmt = om.get("lmtPrice")
-                aux = om.get("auxPrice")
-
-                if ot == "LMT" and lmt is not None:
-                    tp_price = float(lmt)
-                if ot == "STP" and aux is not None:
-                    sl_price = float(aux)
-
-            # ------------------------------
-            # Derive TP/SL percentages from stored entry_avg_price (if any)
-            # ------------------------------
-            tp_arg = tp_price
-            sl_arg = sl_price
-            use_percentages = False
-
-            entry_avg = None
-            try:
-                entry_avg = float(meta.get("entry_avg_price")) if meta.get("entry_avg_price") is not None else None
-            except Exception:
-                entry_avg = None
-
-            if entry_avg and tp_price is not None and sl_price is not None:
-                if direction > 0:
-                    # Long: TP above, SL below
-                    tp_pct = (tp_price - entry_avg) / entry_avg * 100.0
-                    sl_pct = (entry_avg - sl_price) / entry_avg * 100.0
-                else:
-                    # Short: TP below, SL above
-                    tp_pct = (entry_avg - tp_price) / entry_avg * 100.0
-                    sl_pct = (sl_price - entry_avg) / entry_avg * 100.0
-
-                if tp_pct > 0 and sl_pct > 0:
-                    tp_arg = tp_pct
-                    sl_arg = sl_pct
-                    use_percentages = True
-
-            log_step(
-                f"[POSTOPEN] Reopening with bracket acct={ACCOUNT_SHORT_NAME} "
-                f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
-                f"tp={tp_price} sl={sl_price} entry_avg={entry_avg} "
-                f"use_percentages={use_percentages}"
-            )
-            if qty <= 0:
-                log_step(
-                    f"[ALARM] Invalid qty for conId={conId} (qty={qty}); skipping reopen.")
-                continue
-
-            # Reopen by re-executing the last ENTRY webhook for this symbol,
-            # but ignore the execution delay (signalTimestamp) by removing it.
-            local_symbol = getattr(c, "localSymbol", None) or getattr(c, "symbol", None)
-            last_payload = load_last_webhook_for_symbol(local_symbol)
-
-            if last_payload:
-                payload_exec = dict(last_payload)
-                # Force correct contract identity + size
-                payload_exec["symbol"] = local_symbol
-                payload_exec["exchange"] = getattr(c, "exchange", payload_exec.get("exchange", ""))
-                payload_exec["qty"] = qty
-                # Ignore latency check in execute_signal_for_account
-                payload_exec.pop("signalTimestamp", None)
-
-                sig_exec = parse_signal(payload_exec)
-                # Force direction/size from the position snapshot
-                sig_exec.desired_direction = direction
-                sig_exec.desired_qty = qty
-                sig_exec.signal_timestamp = None
-
-                # If we were able to compute updated percentages using entry_avg_price,
-                # override TP/SL from the webhook.
-                if use_percentages:
-                    sig_exec.take_profit = tp_arg
-                    sig_exec.stop_loss = sl_arg
-                    sig_exec.risk_valid = (sig_exec.take_profit is not None and sig_exec.stop_loss is not None)
-
-                log_step(
-                    f"[POSTOPEN] Executing saved webhook reopen symbol={local_symbol} "
-                    f"conId={conId} dir={direction} qty={qty} "
-                    f"tp={sig_exec.take_profit} sl={sig_exec.stop_loss} "
-                    f"ignore_latency=True"
+                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig_exec.symbol}; skipping execution. "
+                    f"qualified_count={nq}"
                 )
-
-                execute_signal_for_account(IB_INSTANCE, sig_exec, settings, c)
-            """ else:
-                # Fallback to the existing snapshot-based bracket reopen.
-                open_position_with_brackets(IB_INSTANCE,
-                                            c,
-                                            direction,
-                                            qty,
-                                            take_profit=tp_arg,
-                                            stop_loss=sl_arg,
-                                            target_percentage=None,
-                                            tp_sl_are_multipliers=not use_percentages,
-                                            trade_reason="postopen reopening"
-                                            ) """
-
-            # time.sleep(1)
-
-        # IB_INSTANCE.disconnect()
-
-        # Mark reopen done
-        with _state_lock:
-            st = load_state()
-            st["preclose"][dayk][state_account_key]["reopen_done"] = True
-            st["preclose"][dayk][state_account_key
-                                 ]["reopen_at"] = now_local.isoformat()
-            save_state(st)
-
+                flush_account_log("POSTOPEN_EXEC")
+                return
+            execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
+            qty_pos = current_position_qty(IB_INSTANCE, contract)
+            trades = IB_INSTANCE.openTrades()
+            filtered = []
+            for t in trades:
+                try:
+                    if t.contract and t.contract.conId == contract.conId:
+                        filtered.append(t)
+                except Exception:
+                    continue
+            log_trade_event(
+                {
+                    "positions_after_webhook_execution": abs(qty_pos),
+                    "orders_after_webhook_execution": len(filtered),
+                }
+            )
     except Exception as e:
-        # IB_INSTANCE.disconnect()
         log_step(f"[ALARM] Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
     finally:
-        # try:
-        #     IB_INSTANCE.disconnect()
-        # except:
-        #     pass
-
-        # Give IB time to release clientID to avoid "clientId already in use"
-        # time.sleep(1.2)
         flush_account_log("POSTOPEN_EXEC")
 
 
@@ -2418,39 +2267,26 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
             log_step(
                 f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(IB_INSTANCE, contract, qty)
-            
-            # time.sleep(1)
 
-            # Retry close
             if not wait_until_flat(IB_INSTANCE, contract, settings):
                 log_step(
                     "[ALARM] Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
-                # close_position(contract, qty)
-                # time.sleep(1)
+ 
                 result.update(
                     {"ok": False, "action": "reversal_close_not_confirmed"})
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             cancel_all_open_orders(
                 IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
 
-                # if not wait_until_flat(contract, settings):
-                #     result.update({"ok": False, "action": "reversal_close_not_confirmed"})
-                #     logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #     IB_INSTANCE.disconnect()
-                #     return result
-
-            # TOO OLD → do not open new position
             if not allow_entry:
                 result.update({
                     "ok": True,
                     "action": "reversal_closed_but_entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2462,24 +2298,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     "action": "reversal_closed_but_entry_skipped_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
-            # cancel_all_open_orders(reason="before_reversal_entry", acct=ACCOUNT_SHORT_NAME, contract=contract)
-            # Fresh enough → open reversed position
-            # time.sleep(max(1, int(settings.delay_sec)))
 
-            # open_position_with_brackets(IB_INSTANCE,
-            #     contract,
-            #     desired_dir,
-            #     desired_qty,
-            #     sig.take_profit,
-            #     sig.stop_loss,
-            #     sig.target_percentage,
-            #     ACCOUNT_SHORT_NAME    # <<< NEW
-            # )
 
             op = open_position_with_brackets(IB_INSTANCE,
                                              contract,
@@ -2491,7 +2314,6 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                              )
 
             if isinstance(op, dict) and not op.get("executed", False):
-                # child says: fill_timeout or some other skip reason
                 result.update({
                     "ok": True,            # important → SQS stops retrying
                     "action": "entry_skipped",
@@ -2500,7 +2322,6 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 })
                 return result
 
-            # logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
                 "ok": True,
@@ -2508,8 +2329,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
+
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -2526,8 +2346,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     "action": "entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2538,13 +2357,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     "action": "entry_ignored_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
-            # Fresh entry → open position
-            # time.sleep(max(0, int(settings.execution_delay)))
+
             log_step(
             f"Calling open position: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
             op = open_position_with_brackets(IB_INSTANCE,
@@ -2557,7 +2374,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                              )
 
             if isinstance(op, dict) and not op.get("executed", False):
-                # child says: fill_timeout or some other skip reason
+
                 result.update({
                     "ok": True,            # important → SQS stops retrying
                     "action": "entry_skipped",
@@ -2566,16 +2383,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 })
                 return result
 
-            # logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
-
             result.update({
                 "ok": True,
                 "action": "opened",
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
+
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -2584,13 +2398,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         # ----------------------------------------------------------
         result.update(
             {"ok": False, "action": "ambiguous_state", "current_qty": qty})
-        # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-        # IB_INSTANCE.disconnect()
         flush_account_log("WEBHOOK_EXEC")
         return result
 
     except Exception as e:
-        # logger.info("error: {str(e)}")
         log_step(f"[ALARM][EXEC] error: {str(e)}")
         result.update({"ok": False, "error": str(e)})
         flush_account_log("WEBHOOK_EXEC")
