@@ -114,14 +114,7 @@ CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
 
-# Trading-hours schedules (GLOBAL — shared across accounts on the host)
-SYMBOL_SCHEDULE_PATH = os.path.join(
-    os.path.dirname(STATE_PATH),
-    "symbol_schedules.json"
-)
-_symbol_schedule_lock = threading.Lock()
-_symbol_timeline_lock = threading.Lock()
-_symbol_timeline_cache: dict[str, dict] = {}
+
 _symbol_next_window_lock = threading.Lock()
 _symbol_next_window_cache: dict[str, dict] = {}
 _symbol_exchange_hints: dict[str, str] = {}
@@ -140,6 +133,48 @@ MARKET_TIMELINE_MONITOR_PATH = os.path.join(
     os.path.dirname(STATE_PATH),
     "market_timeline_monitor.json"
 )
+KNOWN_SYMBOLS_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "known_symbols.json",
+)
+_known_symbols_lock = threading.Lock()
+# In-memory mirror of known_symbols.json — webhooks/scheduler use this (no per-request file read for listing).
+_known_symbols_cache: dict[str, dict] = {}
+_known_symbols_cache_hydrated = False
+
+
+def _hydrate_known_symbols_cache(*, replace: bool) -> None:
+    """
+    Load KNOWN_SYMBOLS_PATH into _known_symbols_cache.
+    replace=True: clear cache first (scheduler thread start — sync from disk).
+    replace=False: no-op if already hydrated (lazy first load for webhooks).
+    """
+    global _known_symbols_cache_hydrated
+    with _known_symbols_lock:
+        if not replace and _known_symbols_cache_hydrated:
+            return
+        if replace:
+            _known_symbols_cache.clear()
+        try:
+            if os.path.exists(KNOWN_SYMBOLS_PATH):
+                with open(KNOWN_SYMBOLS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            _known_symbols_cache[str(k)] = v
+        except Exception as e:
+            logger.warning("[KNOWN_SYMBOLS] hydrate from disk failed: %s", e)
+        _known_symbols_cache_hydrated = True
+
+
+def reload_known_symbols_cache_from_disk() -> None:
+    """Call once at background scheduler thread start."""
+    _hydrate_known_symbols_cache(replace=True)
+
+
+def _ensure_known_symbols_cache_loaded() -> None:
+    _hydrate_known_symbols_cache(replace=False)
 
 
 def _atomic_write_json(path: str, obj: dict) -> None:
@@ -192,156 +227,121 @@ def load_last_webhook_for_symbol(local_symbol: str) -> Dict[str, Any] | None:
             return None
 
 
-def register_symbol_usage_from_signal(sig: "Signal") -> None:
+def _upsert_known_symbol(local_symbol: str, exchange: str | None) -> bool:
     """
-    From the webhook thread: ensure we have trading-hours data in
-    symbol_schedules.json for the current day for this IB-mapped symbol.
-    No separate known_symbols.json is maintained anymore.
+    Update in-memory known-symbols cache and persist KNOWN_SYMBOLS_PATH.
+    Returns True if this localSymbol was not in the cache before this call.
+    """
+    if not local_symbol:
+        return False
+    ex = str(exchange or "CME").strip().split("_")[0].strip() or "CME"
+    entry = {
+        "currency": "USD",
+        "exchange": ex,
+        "localSymbol": local_symbol,
+        "secType": "FUT",
+    }
+    _ensure_known_symbols_cache_loaded()
+    is_new = False
+    with _known_symbols_lock:
+        try:
+            is_new = local_symbol not in _known_symbols_cache
+            _known_symbols_cache[local_symbol] = entry
+            _atomic_write_json(KNOWN_SYMBOLS_PATH, dict(_known_symbols_cache))
+        except Exception as e:
+            logger.warning("[KNOWN_SYMBOLS] upsert failed for %s: %s", local_symbol, e)
+            return False
+    return is_new
+
+
+def _get_exchange_from_known_symbols(local_symbol: str) -> str | None:
+    """Venue from in-memory known-symbols cache (hydrated from disk on first use)."""
+    if not local_symbol:
+        return None
+    try:
+        _ensure_known_symbols_cache_loaded()
+        with _known_symbols_lock:
+            info = _known_symbols_cache.get(local_symbol)
+        if not isinstance(info, dict):
+            return None
+        ex = str(info.get("exchange") or "").strip().split("_")[0].strip()
+        return ex or None
+    except Exception:
+        return None
+
+
+def _get_timezone_id_from_known_symbols(local_symbol: str | None) -> str | None:
+    """IB/session timezone id stored on known symbol (same role as _timeZoneId in schedules)."""
+    if not local_symbol:
+        return None
+    try:
+        _ensure_known_symbols_cache_loaded()
+        with _known_symbols_lock:
+            info = _known_symbols_cache.get(local_symbol)
+        if not isinstance(info, dict):
+            return None
+        tz = info.get("_timeZoneId") or info.get("timeZoneId")
+        if not tz:
+            return None
+        s = str(tz).strip()
+        return s or None
+    except Exception:
+        return None
+
+
+def _merge_known_symbol_timezone(local_symbol: str, tz_name: str | None) -> None:
+    """Persist contract/session timeZoneId on known symbol entry (for now_in_market_tz)."""
+    if not local_symbol or not tz_name:
+        return
+    t = str(tz_name).strip()
+    if not t:
+        return
+    try:
+        _ensure_known_symbols_cache_loaded()
+        with _known_symbols_lock:
+            entry = _known_symbols_cache.get(local_symbol)
+            if not isinstance(entry, dict):
+                return
+            if entry.get("_timeZoneId") == t:
+                return
+            new_e = dict(entry)
+            new_e["_timeZoneId"] = t
+            _known_symbols_cache[local_symbol] = new_e
+            _atomic_write_json(KNOWN_SYMBOLS_PATH, dict(_known_symbols_cache))
+    except Exception as e:
+        logger.warning("[KNOWN_SYMBOLS] merge timezone failed for %s: %s", local_symbol, e)
+
+
+def register_symbol_usage_from_signal(sig: "Signal") -> bool | None:
+    """
+    Persist known_symbols cache + file, then ensure trading-hours data in symbol_schedules.json.
+    Returns: True if localSymbol was newly added to the known-symbols cache, False if it
+    already existed, None if sig.symbol is missing.
     """
     local_symbol = getattr(sig, "symbol", None)
     exchange = getattr(sig, "exchange", None)
 
     if not local_symbol:
-        return
-    if exchange:
-        _symbol_exchange_hints[local_symbol] = str(exchange)
+        return None
+
+    symbol_was_new = _upsert_known_symbol(local_symbol, exchange)
 
     # Minimal contract info needed to request ContractDetails
     entry: dict = {
         "localSymbol": local_symbol,
-        "exchange": exchange or "CME",
+        "exchange": (exchange or "CME").strip().split("_")[0] if exchange else "CME",
         "secType": "FUT",
         "currency": "USD",
     }
 
-    # Only fetch trading hours if we don't already have an entry for
-    # (today + 5 days) for this symbol in symbol_schedules.json.
-    target_day_key = (datetime.utcnow().date() + timedelta(days=5)).isoformat()
-    need_fetch = True
-
-    with _symbol_schedule_lock:
-        try:
-            if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                    sched_all = json.load(f)
-                sym_sched = sched_all.get(local_symbol, {})
-                if target_day_key in sym_sched:
-                    need_fetch = False
-        except Exception:
-            # On any error, fall back to fetching
-            need_fetch = True
-
-    if not need_fetch or IB_LOOP is None or not IB_READY.is_set():
-        return
-
-    try:
-        async def _fetch_one():
-            # First attempt: use provided exchange from webhook
-            sched = await _fetch_trading_hours_for_symbol(local_symbol, entry)
-            if sched:
-                return {local_symbol: sched}
-
-            # Fallback attempt: force CME for futures in case exchange mapping is too specific
-            fallback_entry = dict(entry)
-            fallback_entry["exchange"] = "CME"
-            sched2 = await _fetch_trading_hours_for_symbol(local_symbol, fallback_entry)
-            return {local_symbol: sched2} if sched2 else {}
-
-        fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
-        new_data = fut.result(timeout=30)
-
-        if new_data:
-            _merge_symbol_schedules(new_data)
-            logger.info("[TRADING_HOURS] Filled hours for symbol %s via webhook", local_symbol)
-        else:
-            logger.info("[TRADING_HOURS] No tradingHours data yet for symbol %s", local_symbol)
-    except Exception as e:
-        logger.warning("[TRADING_HOURS] Failed to fill hours for symbol %s: %s", local_symbol, e)
+    
 
 
-def _merge_symbol_schedules(new_data: dict) -> None:
-    with _symbol_schedule_lock:
-        try:
-            if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
-            else:
-                existing = {}
-        except Exception:
-            existing = {}
+   
 
-        for sym, sched in new_data.items():
-            existing.setdefault(sym, {}).update(sched)
-
-        _atomic_write_json(SYMBOL_SCHEDULE_PATH, existing)
+    return symbol_was_new
 
 
-def _load_symbol_timeline() -> dict:
-    with _symbol_timeline_lock:
-        return dict(_symbol_timeline_cache)
-
-
-def _save_symbol_timeline(data: dict) -> None:
-    with _symbol_timeline_lock:
-        _symbol_timeline_cache.clear()
-        _symbol_timeline_cache.update(data)
-
-
-def _symbol_sessions_from_schedule_fallback(symbol: str, fallback_tz: str) -> List[Tuple[datetime, datetime, str]]:
-    """Fallback: build sessions from symbol_schedules.json when IB contract details are unavailable."""
-    if not symbol:
-        return []
-    try:
-        with _symbol_schedule_lock:
-            if not os.path.exists(SYMBOL_SCHEDULE_PATH):
-                return []
-            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                schedules = json.load(f)
-    except Exception:
-        return []
-
-    sym_data = schedules.get(symbol, {})
-    if not isinstance(sym_data, dict):
-        return []
-
-    tz_name = str(sym_data.get("_timeZoneId") or fallback_tz)
-    tz = pytz.timezone(tz_name)
-    sessions: List[Tuple[datetime, datetime, str]] = []
-
-    def _to_local(ts: str) -> datetime:
-        dt_naive = datetime.fromisoformat(str(ts))
-        if dt_naive.tzinfo is None:
-            return tz.localize(dt_naive)
-        return dt_naive.astimezone(tz)
-
-    days = sorted(k for k in sym_data.keys() if not str(k).startswith("_"))
-    for day_key in days:
-        day_info = sym_data.get(day_key)
-        if not isinstance(day_info, dict):
-            continue
-        open_s = day_info.get("open")
-        close_s = day_info.get("close")
-        try:
-            if open_s and close_s:
-                o = _to_local(open_s)
-                c = _to_local(close_s)
-                if c > o:
-                    sessions.append((o, c, tz_name))
-                continue
-            if open_s:
-                d = date.fromisoformat(str(day_key))
-                next_key = (d + timedelta(days=1)).isoformat()
-                next_info = sym_data.get(next_key, {})
-                if isinstance(next_info, dict) and next_info.get("close"):
-                    o = _to_local(open_s)
-                    c = _to_local(next_info["close"])
-                    if c > o:
-                        sessions.append((o, c, tz_name))
-        except Exception:
-            continue
-
-    sessions.sort(key=lambda x: x[0])
-    return sessions
 
 
 async def _fetch_contract_sessions_async(contract: Contract, fallback_tz: str) -> List[Tuple[datetime, datetime, str]]:
@@ -379,26 +379,27 @@ async def _fetch_contract_sessions_async(contract: Contract, fallback_tz: str) -
     return sessions
 
 
-def _symbol_sessions_from_contract_details(symbol: str, fallback_tz: str) -> List[Tuple[datetime, datetime, str]]:
+def _symbol_sessions_from_contract_details(
+    symbol: str, fallback_tz: str, exchange: str | None = None
+) -> List[Tuple[datetime, datetime, str]]:
     """Primary source: IB reqContractDetails(tradingHours), cached briefly to limit API load."""
     if not symbol or IB_LOOP is None or not IB_READY.is_set():
         return []
-    now_ts = time.time()
-    cached = _contract_sessions_cache.get(symbol)
-    if cached and (now_ts - float(cached.get("fetched_at", 0.0))) <= CONTRACT_SESSIONS_TTL_SEC:
-        return list(cached.get("sessions", []))
 
-    ex = (_symbol_exchange_hints.get(symbol) or "").strip()
-    if not ex:
-        payload = load_last_webhook_for_symbol(symbol)
-        if isinstance(payload, dict):
-            ex = str(payload.get("exchange", "")).strip().split("_")[0].strip()
+    ex = (exchange or "").strip().split("_")[0].strip() if exchange else ""
+    
     if not ex:
         logger.warning(
             "[CONTRACT_SESSIONS] No exchange for symbol=%s; need webhook exchange for reqContractDetails",
             symbol,
         )
         return []
+
+    now_ts = time.time()
+    cache_key = f"{symbol}|{ex}"
+    cached = _contract_sessions_cache.get(cache_key)
+    if cached and (now_ts - float(cached.get("fetched_at", 0.0))) <= CONTRACT_SESSIONS_TTL_SEC:
+        return list(cached.get("sessions", []))
 
     contract = build_contract_for_symbol_exchange(symbol, ex)
     sessions: List[Tuple[datetime, datetime, str]] = []
@@ -412,7 +413,11 @@ def _symbol_sessions_from_contract_details(symbol: str, fallback_tz: str) -> Lis
         logger.warning("[CONTRACT_SESSIONS] reqContractDetails failed symbol=%s: %s", symbol, e)
 
     if sessions:
-        _contract_sessions_cache[symbol] = {"fetched_at": now_ts, "sessions": sessions}
+        _contract_sessions_cache[cache_key] = {
+            "fetched_at": now_ts,
+            "sessions": sessions,
+            "exchange": ex,
+        }
     return sessions
 
 
@@ -439,7 +444,12 @@ def _write_symbol_next_window_monitor() -> None:
         logger.warning("[NEXT_WINDOW] Failed writing monitor JSON: %s", e)
 
 
-def refresh_symbol_next_window(symbol: str, settings: Settings, now_local: datetime | None = None) -> dict | None:
+def refresh_symbol_next_window(
+    symbol: str,
+    settings: Settings,
+    now_local: datetime | None = None,
+    exchange: str | None = None,
+) -> dict | None:
     """
     Per-symbol cache with only:
     - next_postopen (open + post_open_min, possibly from next session if already passed)
@@ -451,10 +461,14 @@ def refresh_symbol_next_window(symbol: str, settings: Settings, now_local: datet
     if now_local is None:
         now_local = now_in_market_tz(settings, symbol=symbol)
 
-    sessions = _symbol_sessions_from_contract_details(symbol, settings.timezone)
-    if not sessions:
-        # Keep old path in place as safety fallback.
-        sessions = _symbol_sessions_from_schedule_fallback(symbol, settings.timezone)
+    ex: str | None = None
+    if exchange:
+        ex = str(exchange).strip().split("_")[0].strip() or None
+    if not ex:
+        ex = _get_exchange_from_known_symbols(symbol)
+
+    sessions = _symbol_sessions_from_contract_details(symbol, settings.timezone, exchange=ex)
+
     if not sessions:
         return None
 
@@ -488,6 +502,7 @@ def refresh_symbol_next_window(symbol: str, settings: Settings, now_local: datet
         "session_index": idx,
         "updated_at": now_local,
     }
+    _merge_known_symbol_timezone(symbol, tz_name)
     with _symbol_next_window_lock:
         _symbol_next_window_cache[symbol] = row
     _write_symbol_next_window_monitor()
@@ -1006,266 +1021,41 @@ def now_in_market_tz(settings: Settings, symbol: str | None = None) -> datetime:
     tz_name = settings.timezone
     try:
         if symbol:
-            with _symbol_schedule_lock:
-                if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                    with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                        schedules = json.load(f)
-                    sym_data = schedules.get(symbol, {})
-                    if isinstance(sym_data, dict) and sym_data.get("_timeZoneId"):
-                        tz_name = str(sym_data.get("_timeZoneId"))
+            kt = _get_timezone_id_from_known_symbols(symbol)
+            if kt:
+                tz_name = kt
+            
     except Exception:
         pass
     tz = pytz.timezone(tz_name)
     return datetime.now(tz)
 
 
-def _market_hours_from_symbol_schedule(start_day: date, fallback_tz: str, symbol: str | None = None):
+def _symbols_with_schedule() -> List[Tuple[str, str]]:
     """
-    Try to read market open/close from symbol_schedules.json for a symbol.
-    Handles both:
-      - same-day open+close
-      - overnight sessions (open on day D, close on day D+1)
-    Returns tuple: (open_dt, close_dt, tz_name) or None
+    All symbols in the in-memory known-symbols cache (same keys as KNOWN_SYMBOLS_PATH).
+    Webhooks populate the cache + file; scheduler does not read the schedule file for this list.
+    Returns [(localSymbol, exchange), ...] for Future + reqContractDetails.
     """
+    _ensure_known_symbols_cache_loaded()
     try:
-        with _symbol_schedule_lock:
-            if not os.path.exists(SYMBOL_SCHEDULE_PATH):
-                return None
-            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                schedules = json.load(f)
-    except Exception:
-        return None
-
-    def _to_local_dt(ts: str, tz_name: str):
-        tz = pytz.timezone(tz_name)
-        dt_naive = datetime.fromisoformat(str(ts))
-        if dt_naive.tzinfo is None:
-            return tz.localize(dt_naive)
-        return dt_naive.astimezone(tz)
-
-    # Search day = today, then next days
-    for day_offset in range(0, 10):
-        target_day = (start_day + timedelta(days=day_offset)).isoformat()
-        symbols_iter = [symbol] if symbol and symbol in schedules else list(schedules.keys())
-        for _sym in symbols_iter:
-            sym_data = schedules.get(_sym, {})
-            if not isinstance(sym_data, dict):
+        with _known_symbols_lock:
+            snap = dict(_known_symbols_cache)
+        out: List[Tuple[str, str]] = []
+        for k, info in snap.items():
+            if str(k).startswith("_"):
                 continue
-            day_info = sym_data.get(target_day)
-            if not isinstance(day_info, dict):
+            if not isinstance(info, dict):
                 continue
-            tz_name = str(sym_data.get("_timeZoneId") or fallback_tz)
-            open_s = day_info.get("open")
-            close_s = day_info.get("close")
-            try:
-                # Case 1: same day has both open and close
-                if open_s and close_s:
-                    open_dt = _to_local_dt(open_s, tz_name)
-                    close_dt = _to_local_dt(close_s, tz_name)
-                    if close_dt > open_dt:
-                        return open_dt, close_dt, tz_name
-
-                # Case 2: overnight session open on D, close on D+1
-                if open_s:
-                    next_day = (start_day + timedelta(days=day_offset + 1)).isoformat()
-                    next_info = sym_data.get(next_day, {})
-                    if isinstance(next_info, dict):
-                        next_close = next_info.get("close")
-                        if next_close:
-                            open_dt = _to_local_dt(open_s, tz_name)
-                            close_dt = _to_local_dt(next_close, tz_name)
-                            if close_dt > open_dt:
-                                return open_dt, close_dt, tz_name
-            except Exception:
+            loc = str(info.get("localSymbol") or k).strip()
+            ex = str(info.get("exchange") or "").strip().split("_")[0].strip()
+            if not loc or not ex:
                 continue
-    return None
-
-
-def _symbols_with_schedule() -> List[str]:
-    try:
-        with _symbol_schedule_lock:
-            if not os.path.exists(SYMBOL_SCHEDULE_PATH):
-                return []
-            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                schedules = json.load(f)
-        return [k for k, v in schedules.items() if isinstance(v, dict)]
+            out.append((loc, ex))
+        out.sort(key=lambda t: t[0])
+        return out
     except Exception:
         return []
-
-
-def market_datetimes(now_local: datetime, settings: Settings, symbol: str | None = None):
-    d = now_local.date()
-    from_schedule = False
-
-    # Prefer symbol_schedules.json for open/close (today, with overnight support).
-    sched = _market_hours_from_symbol_schedule(d, settings.timezone, symbol=symbol)
-    if sched:
-        open_dt, close_dt, tz_name = sched
-        from_schedule = True
-    else:
-        tz = pytz.timezone(settings.timezone)
-        oh, om = parse_hhmm(settings.market_open)
-        ch, cm = parse_hhmm(settings.market_close)
-        open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
-        close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
-    
-    preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
-    reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
-
-
-    if not from_schedule:
-        if now_local < reopen_dt:
-            open_dt = open_dt - timedelta(days=1)
-            reopen_dt = reopen_dt - timedelta(days=1)
-        if now_local < preclose_dt:
-            close_dt = close_dt - timedelta(days=1)
-            preclose_dt = preclose_dt - timedelta(days=1)
-
-
-    
-
-    # FINAL LOGGING
-    # logger.info(
-    #     f"[DEBUG/MH] FINAL window: open_dt={open_dt.isoformat()}  "
-    #     f"close_dt={close_dt.isoformat()} "
-    #     f"preclose_dt={preclose_dt.isoformat()} "
-    #     f"reopen_dt={reopen_dt.isoformat()}"
-    # )
-
-    return open_dt, close_dt, preclose_dt, reopen_dt
-
-
-def rebuild_symbol_market_timeline(symbol: str, settings: Settings) -> dict | None:
-    """
-    Precompute and cache per-symbol market timeline datetimes in memory.
-    Used for fast webhook checks without disk I/O.
-    """
-    if not symbol:
-        return None
-    try:
-        now_local = now_in_market_tz(settings, symbol=symbol)
-        sched = _market_hours_from_symbol_schedule(now_local.date(), settings.timezone, symbol=symbol)
-        if not sched:
-            return None
-
-        open_dt, close_dt, tz_name = sched
-        preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
-        reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
-
-        row = {
-            "symbol": symbol,
-            "timezone": str(open_dt.tzinfo),
-            "open_dt": open_dt.isoformat(),
-            "close_dt": close_dt.isoformat(),
-            "preclose_dt": preclose_dt.isoformat(),
-            "reopen_dt": reopen_dt.isoformat(),
-            "computed_at": now_local.isoformat(),
-        }
-        all_rows = _load_symbol_timeline()
-        all_rows[symbol] = row
-        _save_symbol_timeline(all_rows)
-
-        # Monitoring snapshot on disk so you can inspect per-symbol reopen/preclose.
-        try:
-            _atomic_write_json(SYMBOL_TIMELINE_MONITOR_PATH, all_rows)
-        except Exception as e2:
-            logger.warning("[TIMELINE] Failed writing symbol timeline monitor JSON: %s", e2)
-        return row
-    except Exception as e:
-        logger.warning("[TIMELINE] Failed rebuilding symbol timeline for %s: %s", symbol, e)
-        return None
-
-
-def get_symbol_market_timeline(symbol: str) -> dict | None:
-    if not symbol:
-        return None
-    with _symbol_timeline_lock:
-        row = _symbol_timeline_cache.get(symbol)
-        return dict(row) if isinstance(row, dict) else None
-
-def rebuild_market_timeline(settings: Settings):
-    now_local = now_in_market_tz(settings)
-
-    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
-
-    with _market_times_lock:
-
-
-        prev_open = open_dt
-        prev_close = close_dt
-        next_open = open_dt + timedelta(days=1)
-        next_close = close_dt + timedelta(days=1)
-
-
-        prev_preclose = preclose_dt
-        next_preclose = next_close - timedelta(minutes=settings.pre_close_min)
-
-        prev_postopen = reopen_dt
-        next_postopen = next_open + timedelta(minutes=settings.post_open_min)
-
-        _market_times.update({
-            "prev_open": prev_open,
-            "prev_close": prev_close,
-            "next_open": next_open,
-            "next_close": next_close,
-            "prev_preclose": prev_preclose,
-            "next_preclose": next_preclose,
-            "prev_postopen": prev_postopen,
-            "next_postopen": next_postopen,
-        })
-
-    # Monitoring snapshot: write current timeline to JSON for quick inspection.
-    try:
-        monitor = {
-            "updated_at": datetime.utcnow().isoformat(),
-            "prev_open": prev_open.isoformat(),
-            "prev_close": prev_close.isoformat(),
-            "next_open": next_open.isoformat(),
-            "next_close": next_close.isoformat(),
-            "prev_preclose": prev_preclose.isoformat(),
-            "next_preclose": next_preclose.isoformat(),
-            "prev_postopen": prev_postopen.isoformat(),
-            "next_postopen": next_postopen.isoformat(),
-        }
-        _atomic_write_json(MARKET_TIMELINE_MONITOR_PATH, monitor)
-    except Exception as e:
-        logger.warning("[TIMELINE] Failed writing monitor JSON: %s", e)
-
-
-# def in_trading_window(now_local: datetime, settings: Settings) -> bool:
-#     """
-#     Trading window:
-
-#       trading_open  = market_open + post_open_min
-#       trading_close = market_close - pre_close_min
-
-#     Both values come from the SSM /ankro/settings JSON.
-#     Overnight sessions still handled by market_datetimes().
-#     """
-
-#     open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-#         now_local, settings)
-
-#     trading_open = reopen_dt         
-#     trading_close = preclose_dt     
-
-#     ok = trading_open <= now_local <= trading_close
-
-#     return ok
-
-def in_trading_window(now_local: datetime, settings: Settings, symbol: str) -> bool:
-    if USE_SYMBOL_NEXT_WINDOW_CACHE:
-        row = get_symbol_next_window(symbol) or refresh_symbol_next_window(symbol, settings, now_local)
-        if not row:
-            return False
-        return row["next_postopen"] <= now_local <= row["next_preclose"]
-    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings, symbol=symbol)
-    return reopen_dt <= now_local <= preclose_dt
-
-
-def within_preclose_window(now_local: datetime, settings: Settings) -> bool:
-    _, close_dt, preclose_dt, _ = market_datetimes(now_local, settings)
-    return preclose_dt <= now_local < close_dt
 
 
 # ---------------------------
@@ -1279,37 +1069,6 @@ def get_symbol_map() -> Dict[str, Dict[str, str]]:
             logger.info("Invalid SYMBOL_MAP_JSON; using default mapping.")
     return DEFAULT_SYMBOL_MAP
 
-
-# def build_contract(tv_symbol: str) -> Contract:
-#     m = get_symbol_map()
-#     if tv_symbol not in m:
-#         raise ValueError(f"Unknown symbol mapping for '{tv_symbol}'. Configure SYMBOL_MAP_JSON or DEFAULT_SYMBOL_MAP.")
-
-#     info = m[tv_symbol]
-
-#     if info.get("secType") == "FUT":
-#         symbol = info.get("symbol", "")
-#         exchange = info.get("exchange", "CME")
-#         currency = info.get("currency", "USD")
-
-#         # FIXED: local_symbol should come from localSymbol, NOT currency
-#         local_symbol = info.get("localSymbol", "")
-#         ltm = info.get("lastTradeDateOrContractMonth", "")
-
-#         # logger.info(
-#         #     f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
-#         #     f"| currency={currency} | local_symbol={local_symbol}"
-#         # )
-
-#         return Future(
-#             symbol=symbol,
-#             lastTradeDateOrContractMonth=ltm,
-#             exchange=exchange,
-#             currency=currency,
-#             localSymbol=local_symbol,
-#         )
-
-#     raise ValueError(f"Unsupported secType for {tv_symbol}: {info.get('secType')}")
 
 def build_contract(sig: Signal) -> Contract:
     c = Future(
@@ -1852,7 +1611,7 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
     Open/close can fall on different dates (e.g. Sunday only has open).
     Times stored in contract timeZoneId (no UTC). timeZoneId saved on the symbol.
     """
-    c = build_contract_for_symbol_exchange(
+    c = build_contract(
         local_symbol,
         str(info.get("exchange") or "CME"),
     )
@@ -2861,10 +2620,11 @@ def _effective_market_settings(settings: Settings) -> Optional[Settings]:
 def background_scheduler_loop():
     global IB_INSTANCE
     """
-    If SSM market_open is None, uses IB contract details (liquidHours/tradingHours, timeZoneId) for open/close/tz.
-    Runs rebuild_market_timeline only when market open is set (from SSM or IB), inside the loop.
-    Runs ensure_preclose_close_if_needed() and ensure_postopen_reopen_if_needed() once per market day.
+    When USE_SYMBOL_NEXT_WINDOW_CACHE: preclose/postopen reads _symbol_next_window_cache only.
+    Known symbols: reload KNOWN_SYMBOLS_PATH into memory once at thread start; refreshes use
+    (localSymbol, exchange) from that cache only (not symbol_schedules.json).
     """
+    reload_known_symbols_cache_from_disk()
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
     settings = settings_cache.get()
@@ -2872,10 +2632,10 @@ def background_scheduler_loop():
     if not symbols:
         symbols = []
 
-    for sym in symbols:
+    for sym, ex in symbols:
         if USE_SYMBOL_NEXT_WINDOW_CACHE:
-            refresh_symbol_next_window(sym, settings)
-        rebuild_symbol_market_timeline(sym, settings)
+            refresh_symbol_next_window(sym, settings, exchange=ex)
+        #rebuild_symbol_market_timeline(sym, settings)
     while True:
         try:
             settings = settings_cache.get()
@@ -2887,20 +2647,20 @@ def background_scheduler_loop():
             if not symbols:
                 symbols = []
 
-            for sym in symbols:
+            for sym, _ex in symbols:
                 now_sym = now_in_market_tz(settings, symbol=sym)
                 if USE_SYMBOL_NEXT_WINDOW_CACHE:
-                    row = refresh_symbol_next_window(sym, settings, now_sym)
+                    with _symbol_next_window_lock:
+                        row = _symbol_next_window_cache.get(sym)
                     if not row:
                         continue
                     preclose_dt = row["next_preclose"]
                     reopen_dt = row["next_postopen"]
-                else:
-                    _, _, preclose_dt, reopen_dt = market_datetimes(now_sym, settings, symbol=sym)
+                
  
 
                 # PRE-CLOSE per symbol
-                if preclose_dt <= now_sym:
+                if preclose_dt <= now_sym and settings.post_open_min:
                     logger.info("Triggering pre-close ensure symbol=%s", sym)
                     if IB_INSTANCE and IB_INSTANCE.isConnected():
                         with IB_LOCK:
@@ -2909,7 +2669,10 @@ def background_scheduler_loop():
                         logger.info("[ALARM] Preclose: IB not able to connected")
 
                 # POST-OPEN per symbol
-                if reopen_dt <= now_sym and settings.post_open_min:
+                # NOTE: next_postopen already includes post_open_min; do not gate on
+                # settings.post_open_min here — when it is 0, "and settings.post_open_min"
+                # was falsy and post-open never ran.
+                if reopen_dt <= now_sym:
                     logger.info("Triggering post-open ensure symbol=%s", sym)
                     if IB_INSTANCE and IB_INSTANCE.isConnected():
                         with IB_LOCK:
@@ -2921,8 +2684,9 @@ def background_scheduler_loop():
             if not symbols:
                 symbols = []
 
-            for sym in symbols:
-                rebuild_symbol_market_timeline(sym, settings)
+            for sym, ex in symbols:
+                if USE_SYMBOL_NEXT_WINDOW_CACHE:
+                    refresh_symbol_next_window(sym, settings, exchange=ex)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
@@ -2943,28 +2707,16 @@ def start_scheduler():
 
     t = threading.Thread(target=background_scheduler_loop, daemon=True)
     t.start()
-    # logger.info("Background scheduler thread started.")
-
-# START scheduler on module import (works with Waitress)
-
 
 start_scheduler()
 
-
-# def start_ib_connection():
-#     t = threading.Thread(target=ib_connection_manager, daemon=True)
-#     t.start()
-    
 start_ib()
 
 threading.Thread(
     target=ib_connection_watchdog,
     daemon=True
 ).start()
-# start_ib_connection()
-# ---------------------------
-# Flask app
-# ---------------------------
+
 app = Flask(__name__)
 
 
@@ -2990,14 +2742,17 @@ def webhook() -> Any:
         # so POSTOPEN can re-execute the original ENTRY signal.
         save_last_webhook_for_symbol(sig.symbol, payload)
         # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
-        with IB_LOCK:
-            register_symbol_usage_from_signal(sig)
+        #with IB_LOCK:
+        symbol_was_new = register_symbol_usage_from_signal(sig)
         # logger.info(
         #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
         now_local = now_in_market_tz(settings, symbol=sig.symbol)
+        ex = getattr(sig, "exchange", None)
         if USE_SYMBOL_NEXT_WINDOW_CACHE:
-            row = refresh_symbol_next_window(sig.symbol, settings, now_local)
+            # Only call refresh_symbol_next_window on first-seen symbol; otherwise use next-window cache.
+            if symbol_was_new is True:
+                row = refresh_symbol_next_window(sig.symbol, settings, now_local, exchange=ex)
             if not row:
                 logger.info(
                     "[CHECK] GATE trading_hours_unavailable symbol=%s now=%s",
@@ -3007,48 +2762,11 @@ def webhook() -> Any:
                 return jsonify({"ok": True, "ignored": True, "reason": "trading_hours_unavailable"}), 200
             reopen_dt = row["next_postopen"]
             preclose_dt = row["next_preclose"]
-        else:
-            timeline = get_symbol_market_timeline(sig.symbol)
-            if timeline is None:
-                timeline = rebuild_symbol_market_timeline(sig.symbol, settings)
-            if timeline:
-                reopen_dt = datetime.fromisoformat(str(timeline["reopen_dt"]))
-                preclose_dt = datetime.fromisoformat(str(timeline["preclose_dt"]))
-            else:
-                logger.info(
-                    "[CHECK] GATE trading_hours_unavailable symbol=%s now=%s",
-                    sig.symbol, now_local.isoformat()
-                )
-                log_trade_event({"event": "trading_hours_unavailable", "symbol": sig.symbol})
-                return jsonify({"ok": True, "ignored": True, "reason": "trading_hours_unavailable"}), 200
+        
 
-        # delay of 1 minute after reopen (custom)
-        extra_webhook_delay_min = 1
-        webhook_allowed_dt = reopen_dt + timedelta(minutes=extra_webhook_delay_min)
-        if now_local < webhook_allowed_dt:
-            logger.info(
-                f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
-                f"now={now_local.isoformat()} alert={sig.raw_alert}"
-            )
-            log_trade_event({"event": "outside_market_hours_skipping_execution"})
-            return jsonify({
-                "ok": True,
-                "ignored": True,
-                "reason": "webhook_wait_reopen_delay",
-                "allowed_after": webhook_allowed_dt.isoformat()
-            }), 200
-
-        # Invalid window: if next_preclose < next_postopen we should not trade.
-        if preclose_dt < reopen_dt:
-            logger.info(
-                f"[CHECK] GATE invalid_window symbol={sig.symbol} now={now_local.isoformat()} "
-                f"next_postopen={reopen_dt.isoformat()} next_preclose={preclose_dt.isoformat()}"
-            )
-            log_trade_event({"event": "outside_market_hours_skipping_execution"})
-            return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
 
         # market hours gating (cache-based new logic, legacy fallback preserved above)
-        if now_local < reopen_dt or now_local > preclose_dt:
+        if preclose_dt > reopen_dt:
             logger.info(
                 f"[CHECK] GATE outside_market_hours symbol={sig.symbol} now={now_local.isoformat()} "
                 f"next_postopen={reopen_dt.isoformat()} next_preclose={preclose_dt.isoformat()} "
@@ -3058,39 +2776,21 @@ def webhook() -> Any:
             log_trade_event({"event": "outside_market_hours_skipping_execution"})
             return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
 
-        # if within_preclose_window(now_local, settings):
-        #     logger.info(
-        #         f"[CHECK] GATE within_preclose_window now={now_local.isoformat()}")
-        #     logger.info(
-        #         f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
-        #     return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
 
-        #IB_INSTANCE = connect_ib_for_webhook()
         if not IB_INSTANCE or not IB_INSTANCE.isConnected():
             logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
             return jsonify({"ok": False, "error": "ib_not_connected"}), 503
         with IB_LOCK:
             contract = build_contract(sig)
-            #logger.info(f"{contract}")
-            # Qualify contract and detect ambiguity
             qualified = qualify_contract(contract)
-            # qualified = True
-            # logger.info(f"two")
-            # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
 
-            # If 0 or more than 1 contract returned → ambiguous
             result=None
             if not qualified or len(qualified) != 1:
                 log_step(
                     f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
                     f"qualified_count={len(qualified)}"
                 )
-                # logger.info(
-                #     f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
-                #     f"qualified_count={len(qualified)}"
-                # )
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 result.update({
                     "ok": True,
                     "action": "skipped_ambiguous_contract",                # INFO: early return
