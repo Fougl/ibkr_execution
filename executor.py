@@ -114,12 +114,67 @@ CONNECTION_GRACE_SEC = 45  # seconds to suppress startup alarms
 _MIN_TICK_CACHE: dict[str, float] = {}
 _MIN_TICK_LOCK = threading.Lock()
 
-# Trading-hours schedules (GLOBAL — shared across accounts on the host)
-SYMBOL_SCHEDULE_PATH = os.path.join(
+
+_symbol_next_window_lock = threading.Lock()
+_symbol_next_window_cache: dict[str, dict] = {}
+_symbol_exchange_hints: dict[str, str] = {}
+_contract_sessions_cache: dict[str, dict] = {}
+CONTRACT_SESSIONS_TTL_SEC = int(os.getenv("CONTRACT_SESSIONS_TTL_SEC", "45"))
+USE_SYMBOL_NEXT_WINDOW_CACHE = os.getenv("USE_SYMBOL_NEXT_WINDOW_CACHE", "1").strip().lower() in ("1", "true", "yes")
+SYMBOL_TIMELINE_MONITOR_PATH = os.path.join(
     os.path.dirname(STATE_PATH),
-    "symbol_schedules.json"
+    "symbol_market_timeline.json"
 )
-_symbol_schedule_lock = threading.Lock()
+SYMBOL_NEXT_WINDOW_MONITOR_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "symbol_next_window_monitor.json"
+)
+MARKET_TIMELINE_MONITOR_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "market_timeline_monitor.json"
+)
+KNOWN_SYMBOLS_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "known_symbols.json",
+)
+_known_symbols_lock = threading.Lock()
+# In-memory mirror of known_symbols.json — webhooks/scheduler use this (no per-request file read for listing).
+_known_symbols_cache: dict[str, dict] = {}
+_known_symbols_cache_hydrated = False
+
+
+def _hydrate_known_symbols_cache(*, replace: bool) -> None:
+    """
+    Load KNOWN_SYMBOLS_PATH into _known_symbols_cache.
+    replace=True: clear cache first (scheduler thread start — sync from disk).
+    replace=False: no-op if already hydrated (lazy first load for webhooks).
+    """
+    global _known_symbols_cache_hydrated
+    with _known_symbols_lock:
+        if not replace and _known_symbols_cache_hydrated:
+            return
+        if replace:
+            _known_symbols_cache.clear()
+        try:
+            if os.path.exists(KNOWN_SYMBOLS_PATH):
+                with open(KNOWN_SYMBOLS_PATH, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            _known_symbols_cache[str(k)] = v
+        except Exception as e:
+            logger.warning("[KNOWN_SYMBOLS] hydrate from disk failed: %s", e)
+        _known_symbols_cache_hydrated = True
+
+
+def reload_known_symbols_cache_from_disk() -> None:
+    """Call once at background scheduler thread start."""
+    _hydrate_known_symbols_cache(replace=True)
+
+
+def _ensure_known_symbols_cache_loaded() -> None:
+    _hydrate_known_symbols_cache(replace=False)
 
 
 def _atomic_write_json(path: str, obj: dict) -> None:
@@ -129,82 +184,357 @@ def _atomic_write_json(path: str, obj: dict) -> None:
     os.replace(tmp, path)
 
 
-def register_symbol_usage_from_signal(sig: "Signal") -> None:
+# Last webhook per symbol (GLOBAL per host)
+LAST_WEBHOOKS_PATH = os.path.join(
+    os.path.dirname(STATE_PATH),
+    "last_webhooks.json",
+)
+_last_webhooks_lock = threading.Lock()
+
+
+def save_last_webhook_for_symbol(local_symbol: str, payload: Dict[str, Any]) -> None:
     """
-    From the webhook thread: ensure we have trading-hours data in
-    symbol_schedules.json for the current day for this IB-mapped symbol.
-    No separate known_symbols.json is maintained anymore.
+    Always persist the last webhook payload per IB localSymbol so POSTOPEN can
+    re-execute the original ENTRY signal (without relying on signalTimestamp).
+    """
+    if not local_symbol:
+        return
+
+    with _last_webhooks_lock:
+        try:
+            existing: dict = {}
+            if os.path.exists(LAST_WEBHOOKS_PATH):
+                with open(LAST_WEBHOOKS_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            existing[local_symbol] = payload
+            _atomic_write_json(LAST_WEBHOOKS_PATH, existing)
+        except Exception as e:
+            logger.warning("[LAST_WEBHOOKS] Failed saving webhook for %s: %s", local_symbol, e)
+
+
+def load_last_webhook_for_symbol(local_symbol: str) -> Dict[str, Any] | None:
+    if not local_symbol:
+        return None
+    with _last_webhooks_lock:
+        try:
+            if not os.path.exists(LAST_WEBHOOKS_PATH):
+                return None
+            with open(LAST_WEBHOOKS_PATH, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            v = existing.get(local_symbol)
+            return v if isinstance(v, dict) else None
+        except Exception:
+            return None
+
+
+def delete_last_webhook_for_symbol(local_symbol: str) -> None:
+    """Remove persisted last webhook for this IB localSymbol (e.g. flat before preclose)."""
+    if not local_symbol:
+        return
+    with _last_webhooks_lock:
+        try:
+            existing: dict = {}
+            if os.path.exists(LAST_WEBHOOKS_PATH):
+                with open(LAST_WEBHOOKS_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            if not isinstance(existing, dict):
+                existing = {}
+            if local_symbol not in existing:
+                return
+            del existing[local_symbol]
+            _atomic_write_json(LAST_WEBHOOKS_PATH, existing)
+        except Exception as e:
+            logger.warning("[LAST_WEBHOOKS] Failed deleting webhook for %s: %s", local_symbol, e)
+
+
+def _upsert_known_symbol(local_symbol: str, exchange: str | None) -> bool:
+    """
+    Update in-memory known-symbols cache and persist KNOWN_SYMBOLS_PATH.
+    Returns True if this localSymbol was not in the cache before this call.
+    """
+    if not local_symbol:
+        return False
+    ex = str(exchange or "CME").strip().split("_")[0].strip() or "CME"
+    entry = {
+        "currency": "USD",
+        "exchange": ex,
+        "localSymbol": local_symbol,
+        "secType": "FUT",
+    }
+    _ensure_known_symbols_cache_loaded()
+    is_new = False
+    with _known_symbols_lock:
+        try:
+            is_new = local_symbol not in _known_symbols_cache
+            _known_symbols_cache[local_symbol] = entry
+            _atomic_write_json(KNOWN_SYMBOLS_PATH, dict(_known_symbols_cache))
+        except Exception as e:
+            logger.warning("[KNOWN_SYMBOLS] upsert failed for %s: %s", local_symbol, e)
+            return False
+    return is_new
+
+
+def _get_exchange_from_known_symbols(local_symbol: str) -> str | None:
+    """Venue from in-memory known-symbols cache (hydrated from disk on first use)."""
+    if not local_symbol:
+        return None
+    try:
+        _ensure_known_symbols_cache_loaded()
+        with _known_symbols_lock:
+            info = _known_symbols_cache.get(local_symbol)
+        if not isinstance(info, dict):
+            return None
+        ex = str(info.get("exchange") or "").strip().split("_")[0].strip()
+        return ex or None
+    except Exception:
+        return None
+
+
+def _get_timezone_id_from_known_symbols(local_symbol: str | None) -> str | None:
+    """IB/session timezone id stored on known symbol (same role as _timeZoneId in schedules)."""
+    if not local_symbol:
+        return None
+    try:
+        _ensure_known_symbols_cache_loaded()
+        with _known_symbols_lock:
+            info = _known_symbols_cache.get(local_symbol)
+        if not isinstance(info, dict):
+            return None
+        tz = info.get("_timeZoneId") or info.get("timeZoneId")
+        if not tz:
+            return None
+        s = str(tz).strip()
+        return s or None
+    except Exception:
+        return None
+
+
+def _merge_known_symbol_timezone(local_symbol: str, tz_name: str | None) -> None:
+    """Persist contract/session timeZoneId on known symbol entry (for now_in_market_tz)."""
+    if not local_symbol or not tz_name:
+        return
+    t = str(tz_name).strip()
+    if not t:
+        return
+    try:
+        _ensure_known_symbols_cache_loaded()
+        with _known_symbols_lock:
+            entry = _known_symbols_cache.get(local_symbol)
+            if not isinstance(entry, dict):
+                return
+            if entry.get("_timeZoneId") == t:
+                return
+            new_e = dict(entry)
+            new_e["_timeZoneId"] = t
+            _known_symbols_cache[local_symbol] = new_e
+            _atomic_write_json(KNOWN_SYMBOLS_PATH, dict(_known_symbols_cache))
+    except Exception as e:
+        logger.warning("[KNOWN_SYMBOLS] merge timezone failed for %s: %s", local_symbol, e)
+
+
+def register_symbol_usage_from_signal(sig: "Signal") -> bool | None:
+    """
+    Persist known_symbols cache + file, then ensure trading-hours data in symbol_schedules.json.
+    Returns: True if localSymbol was newly added to the known-symbols cache, False if it
+    already existed, None if sig.symbol is missing.
     """
     local_symbol = getattr(sig, "symbol", None)
     exchange = getattr(sig, "exchange", None)
 
     if not local_symbol:
-        return
+        return None
+
+    symbol_was_new = _upsert_known_symbol(local_symbol, exchange)
 
     # Minimal contract info needed to request ContractDetails
     entry: dict = {
         "localSymbol": local_symbol,
-        "exchange": exchange or "CME",
+        "exchange": (exchange or "CME").strip().split("_")[0] if exchange else "CME",
         "secType": "FUT",
         "currency": "USD",
     }
 
-    # Only fetch trading hours if we don't already have an entry for *today*
-    # for this symbol in symbol_schedules.json.
-    today_key = datetime.utcnow().date().isoformat()
-    need_fetch = True
+    
 
-    with _symbol_schedule_lock:
-        try:
-            if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                    sched_all = json.load(f)
-                sym_sched = sched_all.get(local_symbol, {})
-                if today_key in sym_sched:
-                    need_fetch = False
-        except Exception:
-            # On any error, fall back to fetching
-            need_fetch = True
 
-    if not need_fetch or IB_LOOP is None or not IB_READY.is_set():
-        return
+   
 
+    return symbol_was_new
+
+
+
+
+async def _fetch_contract_sessions_async(contract: Contract, fallback_tz: str) -> List[Tuple[datetime, datetime, str]]:
+    details_list = await IB_INSTANCE.reqContractDetailsAsync(contract)
+    if not details_list:
+        return []
+    cd = details_list[0]
+    tz_name = str(getattr(cd, "timeZoneId", "") or fallback_tz or "America/New_York")
     try:
-        async def _fetch_one():
-            sched = await _fetch_trading_hours_for_symbol(local_symbol, entry)
-            return {local_symbol: sched} if sched else {}
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo(tz_name)
+    except Exception:
+        from zoneinfo import ZoneInfo
+        local_tz = ZoneInfo("America/New_York")
 
-        fut = asyncio.run_coroutine_threadsafe(_fetch_one(), IB_LOOP)
-        new_data = fut.result(timeout=30)
-
-        # Always ensure the schedules file exists, even if no data yet.
-        if not os.path.exists(SYMBOL_SCHEDULE_PATH):
-            _atomic_write_json(SYMBOL_SCHEDULE_PATH, {})
-
-        if new_data:
-            _merge_symbol_schedules(new_data)
-            logger.info("[TRADING_HOURS] Filled hours for symbol %s via webhook", local_symbol)
-        else:
-            logger.info("[TRADING_HOURS] No tradingHours data yet for symbol %s", local_symbol)
-    except Exception as e:
-        logger.warning("[TRADING_HOURS] Failed to fill hours for symbol %s: %s", local_symbol, e)
-
-
-def _merge_symbol_schedules(new_data: dict) -> None:
-    with _symbol_schedule_lock:
+    th_str = getattr(cd, "tradingHours", "") or ""
+    sessions: List[Tuple[datetime, datetime, str]] = []
+    for segment in th_str.split(";"):
+        segment = segment.strip()
+        if not segment or "CLOSED" in segment:
+            continue
+        if ":" not in segment or "-" not in segment:
+            continue
         try:
-            if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                    existing = json.load(f)
-            else:
-                existing = {}
+            start_part, end_part = segment.split("-", 1)
+            start_day, start_time = start_part.split(":", 1)
+            end_day, end_time = end_part.split(":", 1)
+            start_local = datetime.strptime(f"{start_day}{start_time}", "%Y%m%d%H%M").replace(tzinfo=local_tz)
+            end_local = datetime.strptime(f"{end_day}{end_time}", "%Y%m%d%H%M").replace(tzinfo=local_tz)
+            if end_local > start_local:
+                sessions.append((start_local, end_local, tz_name))
         except Exception:
-            existing = {}
+            continue
+    sessions.sort(key=lambda x: x[0])
+    return sessions
 
-        for sym, sched in new_data.items():
-            existing.setdefault(sym, {}).update(sched)
 
-        _atomic_write_json(SYMBOL_SCHEDULE_PATH, existing)
+def _symbol_sessions_from_contract_details(
+    symbol: str, fallback_tz: str, exchange: str | None = None
+) -> List[Tuple[datetime, datetime, str]]:
+    """Primary source: IB reqContractDetails(tradingHours), cached briefly to limit API load."""
+    if not symbol or IB_LOOP is None or not IB_READY.is_set():
+        return []
+
+    ex = (exchange or "").strip().split("_")[0].strip() if exchange else ""
+    
+    if not ex:
+        logger.warning(
+            "[CONTRACT_SESSIONS] No exchange for symbol=%s; need webhook exchange for reqContractDetails",
+            symbol,
+        )
+        return []
+
+    now_ts = time.time()
+    cache_key = f"{symbol}|{ex}"
+    cached = _contract_sessions_cache.get(cache_key)
+    if cached and (now_ts - float(cached.get("fetched_at", 0.0))) <= CONTRACT_SESSIONS_TTL_SEC:
+        return list(cached.get("sessions", []))
+
+    contract = build_contract_for_symbol_exchange(symbol, ex)
+    sessions: List[Tuple[datetime, datetime, str]] = []
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _fetch_contract_sessions_async(contract, fallback_tz),
+            IB_LOOP,
+        )
+        sessions = fut.result(timeout=10) or []
+    except Exception as e:
+        logger.warning("[CONTRACT_SESSIONS] reqContractDetails failed symbol=%s: %s", symbol, e)
+
+    if sessions:
+        _contract_sessions_cache[cache_key] = {
+            "fetched_at": now_ts,
+            "sessions": sessions,
+            "exchange": ex,
+        }
+    return sessions
+
+
+def _write_symbol_next_window_monitor() -> None:
+    out: dict[str, dict] = {}
+    with _symbol_next_window_lock:
+        for sym, row in _symbol_next_window_cache.items():
+            try:
+                out[sym] = {
+                    "symbol": sym,
+                    "timezone": row["timezone"],
+                    "next_postopen": row["next_postopen"].isoformat(),
+                    "next_preclose": row["next_preclose"].isoformat(),
+                    "session_open": row["session_open"].isoformat(),
+                    "session_close": row["session_close"].isoformat(),
+                    "session_index": row["session_index"],
+                    "updated_at": row["updated_at"].isoformat(),
+                }
+            except Exception:
+                continue
+    try:
+        _atomic_write_json(SYMBOL_NEXT_WINDOW_MONITOR_PATH, out)
+    except Exception as e:
+        logger.warning("[NEXT_WINDOW] Failed writing monitor JSON: %s", e)
+
+
+def refresh_symbol_next_window(
+    symbol: str,
+    settings: Settings,
+    now_local: datetime | None = None,
+    exchange: str | None = None,
+) -> dict | None:
+    """
+    Per-symbol cache with only:
+    - next_postopen (open + post_open_min, possibly from next session if already passed)
+    - next_preclose (close - pre_close_min of first non-closed session)
+    - timezone
+    """
+    if not symbol:
+        return None
+    if now_local is None:
+        now_local = now_in_market_tz(settings, symbol=symbol)
+
+    ex: str | None = None
+    if exchange:
+        ex = str(exchange).strip().split("_")[0].strip() or None
+    if not ex:
+        ex = _get_exchange_from_known_symbols(symbol)
+
+    sessions = _symbol_sessions_from_contract_details(symbol, settings.timezone, exchange=ex)
+
+    if not sessions:
+        return None
+
+    post_delta = timedelta(minutes=settings.post_open_min)
+    pre_delta = timedelta(minutes=settings.pre_close_min)
+
+    idx = 0
+    for i, (_o, c, _tz) in enumerate(sessions):
+        if c > now_local:
+            idx = i
+            break
+    else:
+        idx = len(sessions) - 1
+
+    sess_open, sess_close, tz_name = sessions[idx]
+    next_preclose = sess_close - pre_delta
+    curr_postopen = sess_open + post_delta
+
+    if now_local > curr_postopen and idx + 1 < len(sessions):
+        next_postopen = sessions[idx + 1][0] + post_delta
+    else:
+        next_postopen = curr_postopen
+
+    row = {
+        "symbol": symbol,
+        "timezone": tz_name,
+        "next_postopen": next_postopen,
+        "next_preclose": next_preclose,
+        "session_open": sess_open,
+        "session_close": sess_close,
+        "session_index": idx,
+        "updated_at": now_local,
+    }
+    _merge_known_symbol_timezone(symbol, tz_name)
+    with _symbol_next_window_lock:
+        _symbol_next_window_cache[symbol] = row
+    _write_symbol_next_window_monitor()
+    return dict(row)
+
+
+def get_symbol_next_window(symbol: str) -> dict | None:
+    if not symbol:
+        return None
+    with _symbol_next_window_lock:
+        row = _symbol_next_window_cache.get(symbol)
+        return dict(row) if isinstance(row, dict) else None
 
 
 # Resolve AWS region ONCE at startup
@@ -707,113 +1037,45 @@ def parse_hhmm(s: str) -> Tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
-def now_in_market_tz(settings: Settings) -> datetime:
-    tz = pytz.timezone(settings.timezone)
+def now_in_market_tz(settings: Settings, symbol: str | None = None) -> datetime:
+    tz_name = settings.timezone
+    try:
+        if symbol:
+            kt = _get_timezone_id_from_known_symbols(symbol)
+            if kt:
+                tz_name = kt
+            
+    except Exception:
+        pass
+    tz = pytz.timezone(tz_name)
     return datetime.now(tz)
 
 
-def market_datetimes(now_local: datetime, settings: Settings):
-    tz = pytz.timezone(settings.timezone)
-    d = now_local.date()
-
-    # Parse HH:MM
-    oh, om = parse_hhmm(settings.market_open)
-    ch, cm = parse_hhmm(settings.market_close)
-
-    open_dt = tz.localize(datetime(d.year, d.month, d.day, oh, om))
-    close_dt = tz.localize(datetime(d.year, d.month, d.day, ch, cm))
-    
-    preclose_dt = close_dt - timedelta(minutes=settings.pre_close_min)
-    reopen_dt = open_dt + timedelta(minutes=settings.post_open_min)
-
-
-    if now_local < reopen_dt:
-        open_dt = open_dt - timedelta(days=1)
-        reopen_dt = reopen_dt - timedelta(days=1)
-    
-    if now_local < preclose_dt:
-        close_dt = close_dt - timedelta(days=1)
-        preclose_dt = preclose_dt - timedelta(days=1)
-
-
-    
-
-    # FINAL LOGGING
-    # logger.info(
-    #     f"[DEBUG/MH] FINAL window: open_dt={open_dt.isoformat()}  "
-    #     f"close_dt={close_dt.isoformat()} "
-    #     f"preclose_dt={preclose_dt.isoformat()} "
-    #     f"reopen_dt={reopen_dt.isoformat()}"
-    # )
-
-    return open_dt, close_dt, preclose_dt, reopen_dt
-
-def rebuild_market_timeline(settings: Settings):
-    now_local = now_in_market_tz(settings)
-
-    open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
-
-    with _market_times_lock:
-
-
-        prev_open = open_dt
-        prev_close = close_dt
-        next_open = open_dt + timedelta(days=1)
-        next_close = close_dt + timedelta(days=1)
-
-
-        prev_preclose = preclose_dt
-        next_preclose = next_close - timedelta(minutes=settings.pre_close_min)
-
-        prev_postopen = reopen_dt
-        next_postopen = next_open + timedelta(minutes=settings.post_open_min)
-
-        _market_times.update({
-            "prev_open": prev_open,
-            "prev_close": prev_close,
-            "next_open": next_open,
-            "next_close": next_close,
-            "prev_preclose": prev_preclose,
-            "next_preclose": next_preclose,
-            "prev_postopen": prev_postopen,
-            "next_postopen": next_postopen,
-        })
-
-
-# def in_trading_window(now_local: datetime, settings: Settings) -> bool:
-#     """
-#     Trading window:
-
-#       trading_open  = market_open + post_open_min
-#       trading_close = market_close - pre_close_min
-
-#     Both values come from the SSM /ankro/settings JSON.
-#     Overnight sessions still handled by market_datetimes().
-#     """
-
-#     open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-#         now_local, settings)
-
-#     trading_open = reopen_dt         
-#     trading_close = preclose_dt     
-
-#     ok = trading_open <= now_local <= trading_close
-
-#     return ok
-
-def in_trading_window(now_local):
-
-    with _market_times_lock:
-        next_preclose = _market_times["next_preclose"]
-        #prev_postopen = _market_times["prev_postopen"]
-        next_postopen = _market_times["next_postopen"]
-
-    return  next_preclose<next_postopen
-
-
-def within_preclose_window(now_local: datetime, settings: Settings) -> bool:
-    _, close_dt, preclose_dt, _ = market_datetimes(now_local, settings)
-    return preclose_dt <= now_local < close_dt
+def _symbols_with_schedule() -> List[Tuple[str, str]]:
+    """
+    All symbols in the in-memory known-symbols cache (same keys as KNOWN_SYMBOLS_PATH).
+    Webhooks populate the cache + file; scheduler does not read the schedule file for this list.
+    Returns [(localSymbol, exchange), ...] for Future + reqContractDetails.
+    """
+    _ensure_known_symbols_cache_loaded()
+    try:
+        with _known_symbols_lock:
+            snap = dict(_known_symbols_cache)
+        out: List[Tuple[str, str]] = []
+        for k, info in snap.items():
+            if str(k).startswith("_"):
+                continue
+            if not isinstance(info, dict):
+                continue
+            loc = str(info.get("localSymbol") or k).strip()
+            ex = str(info.get("exchange") or "").strip().split("_")[0].strip()
+            if not loc or not ex:
+                continue
+            out.append((loc, ex))
+        out.sort(key=lambda t: t[0])
+        return out
+    except Exception:
+        return []
 
 
 # ---------------------------
@@ -827,37 +1089,6 @@ def get_symbol_map() -> Dict[str, Dict[str, str]]:
             logger.info("Invalid SYMBOL_MAP_JSON; using default mapping.")
     return DEFAULT_SYMBOL_MAP
 
-
-# def build_contract(tv_symbol: str) -> Contract:
-#     m = get_symbol_map()
-#     if tv_symbol not in m:
-#         raise ValueError(f"Unknown symbol mapping for '{tv_symbol}'. Configure SYMBOL_MAP_JSON or DEFAULT_SYMBOL_MAP.")
-
-#     info = m[tv_symbol]
-
-#     if info.get("secType") == "FUT":
-#         symbol = info.get("symbol", "")
-#         exchange = info.get("exchange", "CME")
-#         currency = info.get("currency", "USD")
-
-#         # FIXED: local_symbol should come from localSymbol, NOT currency
-#         local_symbol = info.get("localSymbol", "")
-#         ltm = info.get("lastTradeDateOrContractMonth", "")
-
-#         # logger.info(
-#         #     f"[CONTRACT] tv_symbol={tv_symbol} | symbol={symbol} | exchange={exchange} "
-#         #     f"| currency={currency} | local_symbol={local_symbol}"
-#         # )
-
-#         return Future(
-#             symbol=symbol,
-#             lastTradeDateOrContractMonth=ltm,
-#             exchange=exchange,
-#             currency=currency,
-#             localSymbol=local_symbol,
-#         )
-
-#     raise ValueError(f"Unsupported secType for {tv_symbol}: {info.get('secType')}")
 
 def build_contract(sig: Signal) -> Contract:
     c = Future(
@@ -883,6 +1114,19 @@ class Signal:
     target_percentage: float | None = None
     signal_timestamp: float | None = None
     risk_valid: bool | None = None
+
+
+def build_contract_for_symbol_exchange(local_symbol: str, exchange: str) -> Contract:
+    """Same `Future` as `build_contract` — use for scheduler / tradingHours without a full webhook alert."""
+    return build_contract(
+        Signal(
+            symbol=local_symbol,
+            exchange=exchange,
+            desired_direction=0,
+            desired_qty=1,
+            raw_alert="contract_hours",
+        )
+    )
 
 
 def parse_signal(payload: Dict[str, Any]) -> Signal:
@@ -1382,16 +1626,18 @@ def qualify_contract(contract):
 
 async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict:
     """
-    Runs on IB_LOOP: request ContractDetails and parse tradingHours into UTC
-    open/close times keyed by date (YYYY-MM-DD).
+    Runs on IB_LOOP: request ContractDetails and parse tradingHours.
+    tradingHours has only open intervals (no CLOSED; that's in liquidHours).
+    Open/close can fall on different dates (e.g. Sunday only has open).
+    Times stored in contract timeZoneId (no UTC). timeZoneId saved on the symbol.
     """
-    c = Future(
-        localSymbol=local_symbol,
-        exchange=info.get("exchange", "CME"),
-        currency=info.get("currency", "USD"),
+    c = build_contract(
+        local_symbol,
+        str(info.get("exchange") or "CME"),
     )
 
     details_list = await IB_INSTANCE.reqContractDetailsAsync(c)
+    logger.info(details_list)
     if not details_list:
         return {}
 
@@ -1407,109 +1653,49 @@ async def _fetch_trading_hours_for_symbol(local_symbol: str, info: dict) -> dict
     out: dict[str, dict] = {}
     th_str = getattr(cd, "tradingHours", "") or ""
 
-    # Format per IB docs (example):
-    # "20260315:1700-20260316:1600;20260316:1700-20260317:1600;..."
+    # tradingHours: "20260315:1700-20260316:1600;20260316:1700-20260317:1600;..." (no CLOSED)
     for segment in th_str.split(";"):
         segment = segment.strip()
-        if not segment or ":" not in segment:
+        if not segment or ":" not in segment or "-" not in segment:
             continue
-        # Each segment looks like "YYYYMMDD:HHMM-YYYYMMDD:HHMM[,YYYYMMDD:HHMM-...]"
-        for rng in segment.split(","):
-            rng = rng.strip()
-            if "-" not in rng or ":" not in rng:
-                continue
-            try:
-                start_part, end_part = rng.split("-", 1)
-                start_day, start_time = start_part.split(":", 1)
-                end_day, end_time = end_part.split(":", 1)
-                start_str = f"{start_day}{start_time}"
-                end_str = f"{end_day}{end_time}"
-                start_local = datetime.strptime(start_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
-                end_local = datetime.strptime(end_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
-            except Exception:
-                continue
-
-            date_key = start_local.date().isoformat()
-            start_utc = start_local.astimezone(timezone.utc).isoformat()
-            end_utc = end_local.astimezone(timezone.utc).isoformat()
-
-            d = out.setdefault(date_key, {})
-            if "open" not in d or start_utc < d["open"]:
-                d["open"] = start_utc
-            if "close" not in d or end_utc > d.get("close", ""):
-                d["close"] = end_utc
-
-    return out
-
-
-def _weekly_trading_hours_worker():
-    """
-    Once per week on Sunday ~01:00 UTC, fetch tradingHours for all symbols
-    in the registry and store them into SYMBOL_SCHEDULE_PATH.
-    """
-    last_week_key = None
-
-    while True:
         try:
-            now_utc = datetime.now(timezone.utc)
-            iso_year, iso_week, _ = now_utc.isocalendar()
-            week_key = f"{iso_year}-W{iso_week:02d}"
+            start_part, end_part = segment.split("-", 1)
+            start_part = start_part.strip()
+            end_part = end_part.strip()
+            if ":" not in start_part or ":" not in end_part:
+                continue
+            start_day, start_time = start_part.split(":", 1)
+            end_day, end_time = end_part.split(":", 1)
+            start_str = f"{start_day}{start_time}"
+            end_str = f"{end_day}{end_time}"
+            start_local = datetime.strptime(start_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
+            end_local = datetime.strptime(end_str, "%Y%m%d%H%M").replace(tzinfo=local_tz)
+        except Exception:
+            continue
 
-            # Sunday (6) between 01:00 and 01:10 UTC, once per ISO week
-            if (
-                now_utc.weekday() == 6
-                and dtime(1, 0) <= now_utc.time() <= dtime(1, 10)
-                and last_week_key != week_key
-            ):
-                # Load all symbols we already have in schedules and refresh them.
-                try:
-                    with _symbol_schedule_lock:
-                        if os.path.exists(SYMBOL_SCHEDULE_PATH):
-                            with open(SYMBOL_SCHEDULE_PATH, "r", encoding="utf-8") as f:
-                                existing_sched = json.load(f)
-                        else:
-                            existing_sched = {}
-                except Exception:
-                    existing_sched = {}
+        # Store in local time (timeZoneId), no UTC. Open on start date, close on end date.
+        open_str = start_local.strftime("%Y-%m-%dT%H:%M:%S")
+        close_str = end_local.strftime("%Y-%m-%dT%H:%M:%S")
+        date_open = start_local.date().isoformat()
+        date_close = end_local.date().isoformat()
 
-                symbols = list(existing_sched.keys())
-                if IB_INSTANCE is None or not IB_READY.is_set():
-                    logger.warning("[TRADING_HOURS] IB not ready; skipping this run")
-                elif not symbols:
-                    logger.info("[TRADING_HOURS] No symbols in schedules yet")
-                else:
-                    async def _job():
-                        all_sched: dict[str, dict] = {}
-                        for lsym, info in symbols.items():
-                            try:
-                                sched = await _fetch_trading_hours_for_symbol(lsym, info)
-                                if sched:
-                                    all_sched[lsym] = sched
-                            except Exception as e:
-                                logger.warning("[TRADING_HOURS] Failed for %s: %s", lsym, e)
-                        return all_sched
+        d_open = out.setdefault(date_open, {})
+        if "open" not in d_open or open_str < d_open["open"]:
+            d_open["open"] = open_str
+        d_close = out.setdefault(date_close, {})
+        if "close" not in d_close or close_str > d_close.get("close", ""):
+            d_close["close"] = close_str
 
-                    fut = asyncio.run_coroutine_threadsafe(_job(), IB_LOOP)
-                    try:
-                        new_data = fut.result(timeout=120)
-                        _merge_symbol_schedules(new_data)
-                        logger.info(
-                            "[TRADING_HOURS] Updated schedules for %d symbols (week %s)",
-                            len(new_data),
-                            week_key,
-                        )
-                        last_week_key = week_key
-                    except Exception as e:
-                        logger.warning("[TRADING_HOURS] Scheduler error: %s", e)
-
-        except Exception as e:
-            logger.warning("[TRADING_HOURS] Worker loop error: %s", e)
-
-        time.sleep(60)
+    if not out:
+        return {}
+    result: dict = {"_timeZoneId": tz_name}
+    result.update(out)
+    return result
 
 # ---------------------------
-def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
-    now_local = now_in_market_tz(settings)
+def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings, symbol_filter: str | None = None) -> None:
+    now_local = now_in_market_tz(settings, symbol=symbol_filter)
+    state_account_key = str(ACCOUNT_SHORT_NAME) if not symbol_filter else f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
 
     dayk = state_key_for_day(now_local.date())
 
@@ -1531,7 +1717,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
             already = bool(
                 st.get("preclose", {})
                   .get(dayk, {})
-                  .get(str(ACCOUNT_SHORT_NAME), {})
+                  .get(state_account_key, {})
                   .get("done", False)
             )
         # if already:
@@ -1539,6 +1725,17 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
 
         # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
         pos = IB_INSTANCE.positions()
+        if symbol_filter:
+            pos = [
+                p for p in pos
+                if getattr(getattr(p, "contract", None), "localSymbol", None) == symbol_filter
+                or getattr(getattr(p, "contract", None), "symbol", None) == symbol_filter
+            ]
+            if not any(int(getattr(p, "position", 0) or 0) != 0 for p in pos):
+                delete_last_webhook_for_symbol(symbol_filter)
+                log_step(
+                    f"Preclose: no open position for symbol={symbol_filter}; removed last_webhooks entry"
+                )
 
         
 
@@ -1671,7 +1868,7 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
             st = load_state()
             st.setdefault("preclose", {})
             st["preclose"].setdefault(dayk, {})
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)] = {
+            st["preclose"][dayk][state_account_key] = {
                 "done": True,
                 "at": now_local.isoformat(),
                 "snapshot": snapshot,
@@ -1691,200 +1888,66 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings) -> None:
         flush_account_log("PRECLOSE_EXEC")
 
 
-def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings) -> None:
-
-    # now_local = now_in_market_tz(settings)
-
-    # dayk = state_key_for_day(now_local.date())
-    
-    now_local = now_in_market_tz(settings)
-
-    #open_dt, close_dt, _, _ = market_datetimes(now_local, settings)
-    state_day=_market_times["prev_close"].date()
-    # --------------------------------------------------
-    # FIX: determine correct state day
-    # --------------------------------------------------
-    # if open_dt < close_dt:
-    #     # normal daytime session
-    #     state_day = now_local.date()
-    # else:
-    #     # overnight session → snapshot stored on previous day
-    #     state_day = (now_local - timedelta(days=1)).date()
-    dayk = state_key_for_day(state_day)
-
-    # Ensure persistent global IB connection is alive
-    # if not IB_INSTANCE or not IB_INSTANCE.isConnected():
-    #     logger.info("[ALARM] Global IB_INSTANCE is not connected")
-    #     flush_account_log("POSTOPEN_EXEC")
-    #     return
-    # return jsonify({"ok": False, "error": "ib_not_connected"}), 503
+def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_filter: str | None = None) -> None:
+    """
+    Re-run the saved ENTRY webhook for this symbol: load_last_webhook_for_symbol → parse_signal,
+    then same contract path as /webhook (build_contract → qualify_contract → execute_signal_for_account).
+    Does not write state (no reopen_done / save_state here).
+    """
+    if not symbol_filter:
+        log_step("[POSTOPEN] skipped: no symbol_filter")
+        return
 
     log_step("Postopen potential position reopen")
     try:
-        with _state_lock:
-            st = load_state()
-            entry = st.get("preclose", {}).get(
-                dayk, {}).get(str(ACCOUNT_SHORT_NAME))
 
-        # must have preclose + not already reopened
-        if not entry:
-            log_step("Nothing to reopen")
+        local_symbol = str(symbol_filter).strip()
+        last_payload = load_last_webhook_for_symbol(local_symbol)
+        if not last_payload:
+            log_step(f"[POSTOPEN] No saved webhook for symbol={local_symbol!r}")
             return
-        if entry.get("reopen_done"):# or entry.get("done"):
-            log_step("Postopen was already triggered")
-            return
+        log_trade_event(last_payload)
+        sig_exec = parse_signal(last_payload)
+        sig_exec.desired_direction = direction
+        sig_exec.desired_qty = qty if qty > 0 else sig_exec.desired_qty
+        sig_exec.signal_timestamp = None
 
-        snapshot: Dict[str, Any] = entry.get("snapshot", {}) or {}
-        orders_snapshot: List[Dict[str, Any]] = entry.get(
-            "orders_snapshot", []) or []
+        log_step(
+            f"[POSTOPEN] saved webhook reopen symbol={local_symbol} dir={direction} qty={sig_exec.desired_qty} "
+            f"tp={sig_exec.take_profit} sl={sig_exec.stop_loss}"
+        )
 
-        # ib = ib_connect(IB_HOST, acc.api_port, acc.client_id)
-
-        # must be flat right now
-        any_open = any(int(p.position) != 0 for p in IB_INSTANCE.positions())
-        if any_open:
-            log_step(
-                f"[ALARM] Postopen: acct={ACCOUNT_SHORT_NAME} not flat; will not reopen.")
-            # IB_INSTANCE.disconnect()
-            return
-
-        # no snapshot → mark done
-        if not snapshot:
-            with _state_lock:
-                st = load_state()
-                st["preclose"][dayk][str(
-                    ACCOUNT_SHORT_NAME)]["reopen_done"] = True
-                st["preclose"][dayk][str(
-                    ACCOUNT_SHORT_NAME)]["reopen_at"] = now_local.isoformat()
-                save_state(st)
-            log_step(
-                f"Postopen: acct={ACCOUNT_SHORT_NAME} nothing to reopen (empty snapshot).")
-            # IB_INSTANCE.disconnect()
-            return
-
-        # =====================================================
-        # MAIN LOOP — rebuild original contracts using conId
-        # =====================================================
-        for conId_key, meta in snapshot.items():
-
-            # conId is stored as dict key
-            try:
-                conId = int(conId_key)
-            except:
+        with IB_LOCK:
+            contract = build_contract(sig_exec)
+            qualified = qualify_contract(contract)
+            nq = len(qualified) if qualified else 0
+            if not qualified or nq != 1:
                 log_step(
-                    f"[ALARM][POSTOPEN] Invalid conId key={conId_key}, skipping.")
-                continue
-
-            # Build by conId (BEST POSSIBLE METHOD)
-            c = Contract()
-            c.conId = conId
-
-            try:
-                qc = qualify_contract(c)
-                if qc:
-                    c = qc[0]   # fully qualified contract
-            except Exception as e:
-                log_step(
-                    f"[ALARM][POSTOPEN] qualify failed conId={conId}: {e}")
-            #log_trade_event({"postopen reopen for symbol": c.localSymbol, "orders_after_trade_execution": orders})
-            direction = +1 if int(meta.get("position", 0)) > 0 else -1
-            action = "BUY" if int(meta.get("position", 0)) > 0 else "SELL"
-            qty = abs(int(meta.get("position", 0)))
-            qty2 = int(meta.get("position", 0))
+                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig_exec.symbol}; skipping execution. "
+                    f"qualified_count={nq}"
+                )
+                flush_account_log("POSTOPEN_EXEC")
+                return
             log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
-
-            # ------------------------------
-            # Match TP/SL from snapshot
-            # ------------------------------
-            tp_price = None
-            sl_price = None
-
-            for om in orders_snapshot:
-                if om.get("conId") != conId:
+            execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
+            qty_pos = current_position_qty(IB_INSTANCE, contract)
+            trades = IB_INSTANCE.openTrades()
+            filtered = []
+            for t in trades:
+                try:
+                    if t.contract and t.contract.conId == contract.conId:
+                        filtered.append(t)
+                except Exception:
                     continue
-
-                ot = om.get("orderType")
-                lmt = om.get("lmtPrice")
-                aux = om.get("auxPrice")
-
-                if ot == "LMT" and lmt is not None:
-                    tp_price = float(lmt)
-                if ot == "STP" and aux is not None:
-                    sl_price = float(aux)
-
-            # ------------------------------
-            # Derive TP/SL percentages from stored entry_avg_price (if any)
-            # ------------------------------
-            tp_arg = tp_price
-            sl_arg = sl_price
-            use_percentages = False
-
-            entry_avg = None
-            try:
-                entry_avg = float(meta.get("entry_avg_price")) if meta.get("entry_avg_price") is not None else None
-            except Exception:
-                entry_avg = None
-
-            if entry_avg and tp_price is not None and sl_price is not None:
-                if direction > 0:
-                    # Long: TP above, SL below
-                    tp_pct = (tp_price - entry_avg) / entry_avg * 100.0
-                    sl_pct = (entry_avg - sl_price) / entry_avg * 100.0
-                else:
-                    # Short: TP below, SL above
-                    tp_pct = (entry_avg - tp_price) / entry_avg * 100.0
-                    sl_pct = (sl_price - entry_avg) / entry_avg * 100.0
-
-                if tp_pct > 0 and sl_pct > 0:
-                    tp_arg = tp_pct
-                    sl_arg = sl_pct
-                    use_percentages = True
-
-            log_step(
-                f"[POSTOPEN] Reopening with bracket acct={ACCOUNT_SHORT_NAME} "
-                f"symbol={c.symbol} conId={conId} dir={direction} qty={qty} "
-                f"tp={tp_price} sl={sl_price} entry_avg={entry_avg} "
-                f"use_percentages={use_percentages}"
+            log_trade_event(
+                {
+                    "positions_after_webhook_execution": abs(qty_pos),
+                    "orders_after_webhook_execution": len(filtered),
+                }
             )
-            if qty <= 0 or tp_price is None or sl_price is None:
-                log_step(
-                    f"[ALARM] Missing TP/SL for conId={conId}; skipping reopen.")
-                continue
-
-            open_position_with_brackets(IB_INSTANCE,
-                                        c,
-                                        direction,
-                                        qty,
-                                        take_profit=tp_arg,
-                                        stop_loss=sl_arg,
-                                        target_percentage=None,
-                                        tp_sl_are_multipliers=not use_percentages,
-                                        trade_reason="postopen reopening"
-                                        )
-
-            # time.sleep(1)
-
-        # IB_INSTANCE.disconnect()
-
-        # Mark reopen done
-        with _state_lock:
-            st = load_state()
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)]["reopen_done"] = True
-            st["preclose"][dayk][str(ACCOUNT_SHORT_NAME)
-                                 ]["reopen_at"] = now_local.isoformat()
-            save_state(st)
-
     except Exception as e:
-        # IB_INSTANCE.disconnect()
         log_step(f"[ALARM] Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
     finally:
-        # try:
-        #     IB_INSTANCE.disconnect()
-        # except:
-        #     pass
-
-        # Give IB time to release clientID to avoid "clientId already in use"
-        # time.sleep(1.2)
         flush_account_log("POSTOPEN_EXEC")
 
 
@@ -2063,11 +2126,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                        )
                 log_step("No positions to exit for the exit signal")
                 result.update({"ok": True, "action": "none_already_flat"})
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
-                # pos=len(IB_INSTANCE.positions())
-                # orders=len(IB_INSTANCE.openTrades())
-                # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+ 
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2091,13 +2150,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                    reason="exit_signal",
                                    contract=contract
                                    )
-            # pos=len(IB_INSTANCE.positions())
-            # orders=len(IB_INSTANCE.openTrades())
-            # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+
             log_step("Position closed successfully")
             result.update({"ok": True, "action": "exit_closed"})
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
+
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -2117,26 +2173,19 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
 
                     result.update(
                         {"ok": False, "action": "exit_failed_after_retry"})
-                    # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                    # IB_INSTANCE.disconnect()
-                    # pos=len(IB_INSTANCE.positions())
-                    # orders=len(IB_INSTANCE.openTrades())
-                    # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_long", contract=contract)
                 result.update({"ok": True, "action": "exit_long_closed"})
-                # pos=len(IB_INSTANCE.positions())
-                # orders=len(IB_INSTANCE.openTrades())
-                # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
                 result.update(
                     {"ok": True, "action": "exit_long_no_long_position"})
 
-                #log_trade_event({"event": "no_long_postions_opened"})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2152,24 +2201,16 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 close_position(IB_INSTANCE, contract, qty)
                 if not wait_until_flat(IB_INSTANCE, contract, settings):
                     log_step("[ALARM] Exit close not reflected — retrying")
-                    # close_position(contract, qty)
-                    # time.sleep(1)
+
 
                     result.update(
                         {"ok": False, "action": "exit_failed_after_retry"})
-                    # pos=len(IB_INSTANCE.positions())
-                    # orders=len(IB_INSTANCE.openTrades())
-                    # log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
-                    # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                    # IB_INSTANCE.disconnect()
+
                     flush_account_log("WEBHOOK_EXEC")
                     return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_short", contract=contract)
                 result.update({"ok": True, "action": "exit_short_closed"})
-                # pos=len(IB_INSTANCE.positions())
-                # orders=len(IB_INSTANCE.openTrades())
-                #log_trade_event({"positions_after_trade_execution": pos, "orders_after_trade_execution": orders})
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             else:
@@ -2188,56 +2229,37 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         if qty != 0 and ((qty > 0 and desired_dir > 0) or (qty < 0 and desired_dir < 0)):
             log_step(
                 "[EXEC] Same direction position already opened. Skipping execution")
-            # pos=len(IB_INSTANCE.positions())
-            # orders=len(IB_INSTANCE.openTrades())
-            #log_trade_event({"event": "same_position_already_open_skipping", "positions_already_opened": pos, "orders_alreay_opened": orders})
+)
             result.update(
                 {"ok": True, "action": "none_same_direction_already_open", "current_qty": qty})
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
             flush_account_log("WEBHOOK_EXEC")
             return result
 
-        # ----------------------------------------------------------
-        # REVERSAL (close ALWAYS, but entry obeys latency)
-        # ----------------------------------------------------------
+
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step(
                 f"[EXEC] Opposite direction singal: Closing position and opening new one.")
             close_position(IB_INSTANCE, contract, qty)
-            
-            # time.sleep(1)
 
-            # Retry close
             if not wait_until_flat(IB_INSTANCE, contract, settings):
                 log_step(
                     "[ALARM] Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
-                # close_position(contract, qty)
-                # time.sleep(1)
+ 
                 result.update(
                     {"ok": False, "action": "reversal_close_not_confirmed"})
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
             cancel_all_open_orders(
                 IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
 
-                # if not wait_until_flat(contract, settings):
-                #     result.update({"ok": False, "action": "reversal_close_not_confirmed"})
-                #     logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                #     IB_INSTANCE.disconnect()
-                #     return result
-
-            # TOO OLD → do not open new position
             if not allow_entry:
                 result.update({
                     "ok": True,
                     "action": "reversal_closed_but_entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2249,24 +2271,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     "action": "reversal_closed_but_entry_skipped_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
-            # cancel_all_open_orders(reason="before_reversal_entry", acct=ACCOUNT_SHORT_NAME, contract=contract)
-            # Fresh enough → open reversed position
-            # time.sleep(max(1, int(settings.delay_sec)))
 
-            # open_position_with_brackets(IB_INSTANCE,
-            #     contract,
-            #     desired_dir,
-            #     desired_qty,
-            #     sig.take_profit,
-            #     sig.stop_loss,
-            #     sig.target_percentage,
-            #     ACCOUNT_SHORT_NAME    # <<< NEW
-            # )
 
             op = open_position_with_brackets(IB_INSTANCE,
                                              contract,
@@ -2278,7 +2287,6 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                              )
 
             if isinstance(op, dict) and not op.get("executed", False):
-                # child says: fill_timeout or some other skip reason
                 result.update({
                     "ok": True,            # important → SQS stops retrying
                     "action": "entry_skipped",
@@ -2287,7 +2295,6 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 })
                 return result
 
-            # logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
 
             result.update({
                 "ok": True,
@@ -2295,8 +2302,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
+
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -2313,8 +2319,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     "action": "entry_skipped_due_to_latency",
                     "latency_seconds": sig_age
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
@@ -2325,13 +2330,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     "action": "entry_ignored_no_risk_params",
                     "reason": "missing_takeprofit_or_stoploss"
                 })
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
+
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
-            # Fresh entry → open position
-            # time.sleep(max(0, int(settings.execution_delay)))
+
             log_step(
             f"Calling open position: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
             op = open_position_with_brackets(IB_INSTANCE,
@@ -2344,7 +2347,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                                              )
 
             if isinstance(op, dict) and not op.get("executed", False):
-                # child says: fill_timeout or some other skip reason
+
                 result.update({
                     "ok": True,            # important → SQS stops retrying
                     "action": "entry_skipped",
@@ -2353,16 +2356,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 })
                 return result
 
-            # logger.info(f"[EXEC] Entry order submitted acct={ACCOUNT_SHORT_NAME} dir={desired_dir} qty={desired_qty} symbol={sig.symbol}")
-
             result.update({
                 "ok": True,
                 "action": "opened",
                 "opened_dir": desired_dir,
                 "opened_qty": desired_qty
             })
-            # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-            # IB_INSTANCE.disconnect()
+
             flush_account_log("WEBHOOK_EXEC")
             return result
 
@@ -2371,13 +2371,10 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         # ----------------------------------------------------------
         result.update(
             {"ok": False, "action": "ambiguous_state", "current_qty": qty})
-        # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-        # IB_INSTANCE.disconnect()
         flush_account_log("WEBHOOK_EXEC")
         return result
 
     except Exception as e:
-        # logger.info("error: {str(e)}")
         log_step(f"[ALARM][EXEC] error: {str(e)}")
         result.update({"ok": False, "error": str(e)})
         flush_account_log("WEBHOOK_EXEC")
@@ -2407,162 +2404,73 @@ def _effective_market_settings(settings: Settings) -> Optional[Settings]:
 def background_scheduler_loop():
     global IB_INSTANCE
     """
-    If SSM market_open is None, uses IB contract details (liquidHours/tradingHours, timeZoneId) for open/close/tz.
-    Runs rebuild_market_timeline only when market open is set (from SSM or IB), inside the loop.
-    Runs ensure_preclose_close_if_needed() and ensure_postopen_reopen_if_needed() once per market day.
+    When USE_SYMBOL_NEXT_WINDOW_CACHE: preclose/postopen reads _symbol_next_window_cache only.
+    Known symbols: reload KNOWN_SYMBOLS_PATH into memory once at thread start; refreshes use
+    (localSymbol, exchange) from that cache only (not symbol_schedules.json).
     """
+    reload_known_symbols_cache_from_disk()
     last_preclose_run_day = None   # date of market_open for the last run
     last_postopen_run_day = None   # date of market_open for the last run
     settings = settings_cache.get()
-    rebuild_market_timeline(settings)
+    symbols = _symbols_with_schedule()
+    if not symbols:
+        symbols = []
+
+    for sym, ex in symbols:
+        if USE_SYMBOL_NEXT_WINDOW_CACHE:
+            refresh_symbol_next_window(sym, settings, exchange=ex)
+        #rebuild_symbol_market_timeline(sym, settings)
     while True:
         try:
             settings = settings_cache.get()
             now_local = now_in_market_tz(settings)
 
-            #rebuild_market_timeline(settings)
+            
 
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
+            symbols = _symbols_with_schedule()
+            if not symbols:
+                symbols = []
 
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
+            for sym, _ex in symbols:
+                now_sym = now_in_market_tz(settings, symbol=sym)
+                if USE_SYMBOL_NEXT_WINDOW_CACHE:
+                    with _symbol_next_window_lock:
+                        row = _symbol_next_window_cache.get(sym)
+                    if not row:
+                        continue
+                    preclose_dt = row["next_preclose"]
+                    reopen_dt = row["next_postopen"]
+                
+ 
 
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
+                # PRE-CLOSE per symbol
+                if preclose_dt <= now_sym and settings.post_open_min:
+                    logger.info("Triggering pre-close ensure symbol=%s", sym)
+                    if IB_INSTANCE and IB_INSTANCE.isConnected():
+                        with IB_LOCK:
+                            ensure_preclose_close_if_needed(IB_INSTANCE, settings, symbol_filter=sym)
+                    else:
+                        logger.info("[ALARM] Preclose: IB not able to connected")
 
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
+                # POST-OPEN per symbol
+                # NOTE: next_postopen already includes post_open_min; do not gate on
+                # settings.post_open_min here — when it is 0, "and settings.post_open_min"
+                # was falsy and post-open never ran.
+                if reopen_dt <= now_sym:
+                    logger.info("Triggering post-open ensure symbol=%s", sym)
+                    if IB_INSTANCE and IB_INSTANCE.isConnected():
+                        with IB_LOCK:
+                            ensure_postopen_reopen_if_needed(IB_INSTANCE, settings, symbol_filter=sym)
+                    else:
+                        logger.info("[ALARM] Postopen: IB not able to connected")
 
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
+            symbols = _symbols_with_schedule()
+            if not symbols:
+                symbols = []
 
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
-
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            #rebuild_market_timeline(settings)
-
-            # open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(
-            #     now_local, settings)
-            # logger.info(
-            #     f"[SCHEDULER] now_local={now_local.isoformat()} | "
-            #     f"open_dt={open_dt.isoformat()} | "
-            #     f"close_dt={close_dt.isoformat()} | "
-            #     f"preclose_dt={preclose_dt.isoformat()} | "
-            #     f"reopen_dt={reopen_dt.isoformat()} | "
-            #     f"last_preclose_run_day={last_preclose_run_day} | "
-            #     f"last_postopen_run_day={last_postopen_run_day}"
-            # )
-            # This defines the “trading day” — the day the market opens.
-            # market_day = open_dt.date()
-
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
-
-            # market_day = open_dt.date()
-
-            # 🚨 RESET LOGIC
-            # If the market_day changed since last loop iteration => new trading day
-            # if last_preclose_run_day != market_day:
-            #     last_preclose_run_day = None
-            # if last_postopen_run_day != market_day:
-            #     last_postopen_run_day = None
-
-            # ==========================================
-            # PRE-CLOSE WINDOW — run ONCE per market day
-            # ==========================================
-            if _market_times["next_preclose"] <= now_local:
-                logger.info(
-                    "Triggering pre-close ensure")
-                #IB_INSTANCE = connect_ib_for_webhook()
-                if IB_INSTANCE and IB_INSTANCE.isConnected():
-                    with IB_LOCK:
-                        ensure_preclose_close_if_needed(IB_INSTANCE, settings)
-
-                    #IB_INSTANCE.disconnect()
-                    #logger.info("[IB] Clean disconnect after preclose")
-                else:
-                    logger.info(
-                        "[ALARM] Preclose: IB not able to connected")
-
-            # ==========================================
-            # POST-OPEN WINDOW — run ONCE per market day
-            # ==========================================
-            if _market_times["next_postopen"] <= now_local and settings.post_open_min:
-                logger.info(
-                    "Triggering post-open ensure")
-
-                #IB_INSTANCE = connect_ib_for_webhook()
-                if IB_INSTANCE and IB_INSTANCE.isConnected():
-                    with IB_LOCK:
-                        ensure_postopen_reopen_if_needed(IB_INSTANCE, settings)
-                    #IB_INSTANCE.disconnect()
-                    #logger.info("[IB] Clean disconnect after postopen")
-                else:
-                    logger.info(
-                        "[ALARM] Postopen: IB not able to connected")
-
-                    
-            rebuild_market_timeline(settings)
+            for sym, ex in symbols:
+                if USE_SYMBOL_NEXT_WINDOW_CACHE:
+                    refresh_symbol_next_window(sym, settings, exchange=ex)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
@@ -2583,28 +2491,16 @@ def start_scheduler():
 
     t = threading.Thread(target=background_scheduler_loop, daemon=True)
     t.start()
-    # logger.info("Background scheduler thread started.")
-
-# START scheduler on module import (works with Waitress)
-
 
 start_scheduler()
 
-
-# def start_ib_connection():
-#     t = threading.Thread(target=ib_connection_manager, daemon=True)
-#     t.start()
-    
 start_ib()
 
 threading.Thread(
     target=ib_connection_watchdog,
     daemon=True
 ).start()
-# start_ib_connection()
-# ---------------------------
-# Flask app
-# ---------------------------
+
 app = Flask(__name__)
 
 
@@ -2613,112 +2509,7 @@ def webhook() -> Any:
     global IB_INSTANCE
     logger.info("===HTTP /webhook received")
 
-    try:
-        payload = request.get_json(force=True, silent=False) or {}
-    except Exception:
-        payload = {}
-
-    # Trades log: whole webhook as single JSON line (multiline start with {)
-    log_trade_event(payload)
-
-    try:
-        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-        settings = settings_cache.get()
-        # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-        sig = parse_signal(payload)
-        # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
-        register_symbol_usage_from_signal(sig)
-        # logger.info(
-        #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
-
-        now_local = now_in_market_tz(settings)
-        #open_dt, close_dt, preclose_dt, reopen_dt = market_datetimes(now_local, settings)
-
-        # delay of 1 minute after reopen (custom)
-        extra_webhook_delay_min = 1
-        webhook_allowed_dt = _market_times["prev_postopen"] + timedelta(minutes=extra_webhook_delay_min)
-        if now_local < webhook_allowed_dt:
-            logger.info(
-                f"[CHECK] GATE webhook_blocked_until={webhook_allowed_dt.isoformat()} "
-                f"now={now_local.isoformat()} alert={sig.raw_alert}"
-            )
-            og_trade_event({"event": "outside_market_hours_skipping_execution"})
-            return jsonify({
-                "ok": True,
-                "ignored": True,
-                "reason": "webhook_wait_reopen_delay",
-                "allowed_after": webhook_allowed_dt.isoformat()
-            }), 200
-
-        # market hours gating
-        if not in_trading_window(now_local):
-            logger.info(
-                f"[CHECK] GATE outside_market_hours now={now_local.isoformat()} open={_market_times['next_postopen']} close={_market_times['next_preclose']} ")
-            logger.info(
-                f"Ignored: outside market window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
-            log_trade_event({"event": "outside_market_hours_skipping_execution"})
-            return jsonify({"ok": True, "ignored": True, "reason": "outside_market_hours"}), 200
-
-        # if within_preclose_window(now_local, settings):
-        #     logger.info(
-        #         f"[CHECK] GATE within_preclose_window now={now_local.isoformat()}")
-        #     logger.info(
-        #         f"Ignored: within preclose window now={now_local.isoformat()} alert={sig.raw_alert} symbol={sig.symbol}")
-        #     return jsonify({"ok": True, "ignored": True, "reason": "within_preclose_window"}), 200
-
-        #IB_INSTANCE = connect_ib_for_webhook()
-        if not IB_INSTANCE or not IB_INSTANCE.isConnected():
-            logger.info("[ALARM][WEBHOOK] Global IB_INSTANCE is not connected")
-            return jsonify({"ok": False, "error": "ib_not_connected"}), 503
-        with IB_LOCK:
-            contract = build_contract(sig)
-            #logger.info(f"{contract}")
-            # Qualify contract and detect ambiguity
-            qualified = qualify_contract(contract)
-            # qualified = True
-            # logger.info(f"two")
-            # logger.info(f"[EXEC] qualifyContracts returned count={len(qualified) if qualified is not None else 0}")
-
-            # If 0 or more than 1 contract returned → ambiguous
-            result=None
-            if not qualified or len(qualified) != 1:
-                log_step(
-                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
-                    f"qualified_count={len(qualified)}"
-                )
-                # logger.info(
-                #     f"Ambiguous or unresolved contract for symbol={sig.symbol}; skipping execution. "
-                #     f"qualified_count={len(qualified)}"
-                # )
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
-                result.update({
-                    "ok": True,
-                    "action": "skipped_ambiguous_contract",                # INFO: early return
-
-                    "reason": "ambiguous_contract",
-                    "qualified_count": len(qualified)
-                })
-                flush_account_log("WEBHOOK_EXEC")
-            else:
-                result = execute_signal_for_account(IB_INSTANCE, sig, settings,contract)
-                qty = current_position_qty(IB_INSTANCE, contract)
-                trades = IB_INSTANCE.openTrades()
-                filtered = []
-                for t in trades:
-                    try:
-                        if t.contract and t.contract.conId == contract.conId:
-                            filtered.append(t)
-                    except:
-                        continue
-                log_trade_event({"positions_after_webhook_execution": abs(qty), "orders_after_webhook_execution": len(filtered)})
-        return jsonify({"ok": result["ok"], "result": result}), 200
-
-    except Exception as e:
-        log_trade_event({"error": {e}})
-        logger.exception(
-            f"[ALARM] Webhook handling failed. payload={payload} err={e}")
-        return jsonify({"ok": False, "error": str(e)}), 400
+    
     #finally:
         # 🔥 CRITICAL — disconnect exactly once
         # try:
