@@ -2537,6 +2537,8 @@ def webhook() -> Any:
             # Only call refresh_symbol_next_window on first-seen symbol; otherwise use next-window cache.
             if symbol_was_new is True:
                 row = refresh_symbol_next_window(sig.symbol, settings, now_local, exchange=ex)
+            else:
+                row = get_symbol_next_window(sig.symbol)
             if not row:
                 logger.info(
                     "[CHECK] GATE trading_hours_unavailable symbol=%s now=%s",
