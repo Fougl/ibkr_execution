@@ -515,6 +515,27 @@ def refresh_symbol_next_window(
     else:
         next_postopen = curr_postopen
 
+    # Read previous cached row so test overrides can be one-shot per symbol.
+    with _symbol_next_window_lock:
+        prev_row = _symbol_next_window_cache.get(symbol)
+
+    # Testing override: force next_preclose/next_postopen from "now + N minutes"
+    # without changing scheduling code paths. One-shot latch per symbol: once set,
+    # it is not re-armed on subsequent refreshes.
+    test_preclose_min = (os.getenv("TEST_NEXT_PRECLOSE_MIN", "") or "").strip()
+    if test_preclose_min and not bool((prev_row or {}).get("_test_preclose_locked")):
+        try:
+            next_preclose = now_local + timedelta(minutes=int(test_preclose_min))
+        except Exception:
+            logger.warning("[NEXT_WINDOW][TEST] Invalid TEST_NEXT_PRECLOSE_MIN=%r", test_preclose_min)
+
+    test_postopen_min = (os.getenv("TEST_NEXT_POSTOPEN_MIN", "") or "").strip()
+    if test_postopen_min and not bool((prev_row or {}).get("_test_postopen_locked")):
+        try:
+            next_postopen = now_local + timedelta(minutes=int(test_postopen_min))
+        except Exception:
+            logger.warning("[NEXT_WINDOW][TEST] Invalid TEST_NEXT_POSTOPEN_MIN=%r", test_postopen_min)
+
     row = {
         "symbol": symbol,
         "timezone": tz_name,
@@ -524,6 +545,8 @@ def refresh_symbol_next_window(
         "session_close": sess_close,
         "session_index": idx,
         "updated_at": now_local,
+        "_test_preclose_locked": bool((prev_row or {}).get("_test_preclose_locked")) or bool(test_preclose_min),
+        "_test_postopen_locked": bool((prev_row or {}).get("_test_postopen_locked")) or bool(test_postopen_min),
     }
     _merge_known_symbol_timezone(symbol, tz_name)
     with _symbol_next_window_lock:
