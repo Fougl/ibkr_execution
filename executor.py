@@ -521,7 +521,7 @@ def refresh_symbol_next_window(
         prev = {}
 
     test_preclose_raw = 1
-    test_postopen_raw = 5
+    test_postopen_raw = 3
 
     applied_test_preclose = False
     applied_test_postopen = False
@@ -1960,20 +1960,6 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
     """
     if not symbol_filter:
         log_step("[POSTOPEN] skipped: no symbol_filter")
-        return
-
-    now_local = now_in_market_tz(settings, symbol=symbol_filter)
-    state_account_key = f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
-    dayk = state_key_for_day(now_local.date())
-    with _state_lock:
-        st = load_state()
-        reopen_done = bool(
-            st.get("preclose", {})
-              .get(dayk, {})
-              .get(state_account_key, {})
-              .get("reopen_done", False)
-        )
-    if reopen_done:
         return
 
     log_step("Postopen potential position reopen")
