@@ -1956,10 +1956,24 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
     """
     Re-run the saved ENTRY webhook for this symbol: load_last_webhook_for_symbol → parse_signal,
     then same contract path as /webhook (build_contract → qualify_contract → execute_signal_for_account).
-    Does not write state (no reopen_done / save_state here).
+    Sets preclose[day][acct:symbol].reopen_done after a successful reopen so the scheduler does not repeat.
     """
     if not symbol_filter:
         log_step("[POSTOPEN] skipped: no symbol_filter")
+        return
+
+    now_local = now_in_market_tz(settings, symbol=symbol_filter)
+    state_account_key = f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
+    dayk = state_key_for_day(now_local.date())
+    with _state_lock:
+        st = load_state()
+        reopen_done = bool(
+            st.get("preclose", {})
+              .get(dayk, {})
+              .get(state_account_key, {})
+              .get("reopen_done", False)
+        )
+    if reopen_done:
         return
 
     log_step("Postopen potential position reopen")
@@ -1978,12 +1992,10 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
             return
         log_trade_event(last_payload)
         sig_exec = parse_signal(last_payload)
-        sig_exec.desired_direction = direction
-        sig_exec.desired_qty = qty if qty > 0 else sig_exec.desired_qty
         sig_exec.signal_timestamp = None
 
         log_step(
-            f"[POSTOPEN] saved webhook reopen symbol={local_symbol} dir={direction} qty={sig_exec.desired_qty} "
+            f"[POSTOPEN] saved webhook reopen symbol={local_symbol} dir={sig_exec.desired_direction} qty={sig_exec.desired_qty} "
             f"tp={sig_exec.take_profit} sl={sig_exec.stop_loss}"
         )
 
@@ -1998,7 +2010,14 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
                 )
                 flush_account_log("POSTOPEN_EXEC")
                 return
-            log_trade_event({"postopen reopen for symbol": c.localSymbol, "action": action, "quantity": qty2})
+            contract = qualified[0]
+            log_trade_event(
+                {
+                    "postopen reopen for symbol": getattr(contract, "localSymbol", None),
+                    "action": sig_exec.desired_direction,
+                    "quantity": sig_exec.desired_qty,
+                }
+            )
             execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
             qty_pos = current_position_qty(IB_INSTANCE, contract)
             trades = IB_INSTANCE.openTrades()
@@ -2015,6 +2034,14 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
                     "orders_after_webhook_execution": len(filtered),
                 }
             )
+        with _state_lock:
+            st = load_state()
+            st.setdefault("preclose", {})
+            st["preclose"].setdefault(dayk, {})
+            ent = st["preclose"][dayk].setdefault(state_account_key, {})
+            ent["reopen_done"] = True
+            ent["reopen_at"] = now_local.isoformat()
+            save_state(st)
     except Exception as e:
         log_step(f"[ALARM] Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
     finally:
