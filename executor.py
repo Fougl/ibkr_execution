@@ -1962,6 +1962,20 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
         log_step("[POSTOPEN] skipped: no symbol_filter")
         return
 
+    now_local = now_in_market_tz(settings, symbol=symbol_filter)
+    state_account_key = f"{ACCOUNT_SHORT_NAME}:{symbol_filter}"
+    dayk = state_key_for_day(now_local.date())
+    with _state_lock:
+        st = load_state()
+        reopen_done = bool(
+            st.get("preclose", {})
+              .get(dayk, {})
+              .get(state_account_key, {})
+              .get("reopen_done", False)
+        )
+    if reopen_done:
+        return
+
     log_step("Postopen potential position reopen")
     log_trade_event(
                 {
