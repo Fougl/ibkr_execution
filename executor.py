@@ -923,7 +923,7 @@ def log_trade_event(obj: Dict[str, Any]) -> None:
     try:
         os.makedirs(os.path.dirname(TRADES_LOG_PATH), exist_ok=True)
         with open(TRADES_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(obj, separators=(",", ":")) + "\n")
+            f.write(json.dumps(obj, separators=(",", ":"), default=str) + "\n")
             f.flush()
     except Exception as e:
         logger.warning("Failed to write trades log: %s", e)
@@ -1956,7 +1956,10 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
     """
     Re-run the saved ENTRY webhook for this symbol: load_last_webhook_for_symbol → parse_signal,
     then same contract path as /webhook (build_contract → qualify_contract → execute_signal_for_account).
-    Sets preclose[day][acct:symbol].reopen_done after a successful reopen so the scheduler does not repeat.
+
+    Must be called with IB_LOCK held (scheduler does). Nested IB_LOCK would deadlock.
+
+    Sets preclose[day][acct:symbol].reopen_done only after opened / reversal_opened / same-direction already open.
     """
     if not symbol_filter:
         log_step("[POSTOPEN] skipped: no symbol_filter")
@@ -1998,52 +2001,86 @@ def ensure_postopen_reopen_if_needed(IB_INSTANCE, settings: Settings, symbol_fil
             f"[POSTOPEN] saved webhook reopen symbol={local_symbol} dir={sig_exec.desired_direction} qty={sig_exec.desired_qty} "
             f"tp={sig_exec.take_profit} sl={sig_exec.stop_loss}"
         )
+        log_trade_event(
+            {
+                "event": "postopen_parsed",
+                "filter_symbol": local_symbol,
+                "sig_symbol": sig_exec.symbol,
+                "sig_exchange": sig_exec.exchange,
+                "dir": sig_exec.desired_direction,
+                "qty": sig_exec.desired_qty,
+            }
+        )
 
-        with IB_LOCK:
-            contract = build_contract(sig_exec)
-            qualified = qualify_contract(contract)
-            nq = len(qualified) if qualified else 0
-            if not qualified or nq != 1:
-                log_step(
-                    f"[ALARM] Ambiguous or unresolved contract for symbol={sig_exec.symbol}; skipping execution. "
-                    f"qualified_count={nq}"
-                )
-                flush_account_log("POSTOPEN_EXEC")
-                return
-            contract = qualified[0]
+        # Caller (scheduler) already holds IB_LOCK. Do not nest threading.Lock here — it deadlocks.
+        contract = build_contract(sig_exec)
+        qualified = qualify_contract(contract)
+        nq = len(qualified) if qualified else 0
+        if not qualified or nq != 1:
+            log_step(
+                f"[ALARM] Ambiguous or unresolved contract for symbol={sig_exec.symbol}; skipping execution. "
+                f"qualified_count={nq}"
+            )
             log_trade_event(
                 {
-                    "postopen reopen for symbol": getattr(contract, "localSymbol", None),
-                    "action": sig_exec.desired_direction,
-                    "quantity": sig_exec.desired_qty,
+                    "event": "postopen_qualify_failed",
+                    "symbol": sig_exec.symbol,
+                    "exchange": sig_exec.exchange,
+                    "qualified_count": nq,
                 }
             )
-            execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
-            qty_pos = current_position_qty(IB_INSTANCE, contract)
-            trades = IB_INSTANCE.openTrades()
-            filtered = []
-            for t in trades:
-                try:
-                    if t.contract and t.contract.conId == contract.conId:
-                        filtered.append(t)
-                except Exception:
-                    continue
-            log_trade_event(
-                {
-                    "positions_after_webhook_execution": abs(qty_pos),
-                    "orders_after_webhook_execution": len(filtered),
-                }
-            )
-        with _state_lock:
-            st = load_state()
-            st.setdefault("preclose", {})
-            st["preclose"].setdefault(dayk, {})
-            ent = st["preclose"][dayk].setdefault(state_account_key, {})
-            ent["reopen_done"] = True
-            ent["reopen_at"] = now_local.isoformat()
-            save_state(st)
+            flush_account_log("POSTOPEN_EXEC")
+            return
+        contract = qualified[0]
+        log_trade_event(
+            {
+                "event": "postopen_qualified",
+                "localSymbol": getattr(contract, "localSymbol", None),
+                "conId": getattr(contract, "conId", None),
+                "direction": sig_exec.desired_direction,
+                "quantity": sig_exec.desired_qty,
+            }
+        )
+        exec_result = execute_signal_for_account(IB_INSTANCE, sig_exec, settings, contract)
+        qty_pos = current_position_qty(IB_INSTANCE, contract)
+        trades = IB_INSTANCE.openTrades()
+        filtered = []
+        for t in trades:
+            try:
+                if t.contract and t.contract.conId == contract.conId:
+                    filtered.append(t)
+            except Exception:
+                continue
+        log_trade_event(
+            {
+                "event": "postopen_exec_finished",
+                "exec_ok": exec_result.get("ok"),
+                "exec_action": exec_result.get("action"),
+                "exec_error": exec_result.get("error"),
+                "positions_after": abs(qty_pos),
+                "orders_after": len(filtered),
+            }
+        )
+
+        # Only latch reopen_done when we actually opened or already had the intended position.
+        # Otherwise (qualify fail handled above; entry_skipped / risk / latency) allow retry next tick.
+        action = str(exec_result.get("action") or "")
+        if exec_result.get("ok") and action in (
+            "opened",
+            "reversal_opened",
+            "none_same_direction_already_open",
+        ):
+            with _state_lock:
+                st = load_state()
+                st.setdefault("preclose", {})
+                st["preclose"].setdefault(dayk, {})
+                ent = st["preclose"][dayk].setdefault(state_account_key, {})
+                ent["reopen_done"] = True
+                ent["reopen_at"] = now_local.isoformat()
+                save_state(st)
     except Exception as e:
         log_step(f"[ALARM] Postopen error acct={ACCOUNT_SHORT_NAME}: {e}")
+        logger.exception("[POSTOPEN] Uncaught exception symbol_filter=%r", symbol_filter)
     finally:
         flush_account_log("POSTOPEN_EXEC")
 
