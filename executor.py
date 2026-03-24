@@ -512,16 +512,29 @@ def refresh_symbol_next_window(
     if os.getenv("TEST_NEXT_WINDOW_RESET", "").strip().lower() in ("1", "true", "yes"):
         prev = {}
 
-    test_preclose_raw = 1
-    test_postopen_raw = 10
+    test_preclose_raw = (os.getenv("TEST_NEXT_PRECLOSE_MIN", "") or "").strip()
+    test_postopen_raw = (os.getenv("TEST_NEXT_POSTOPEN_MIN", "") or "").strip()
 
     applied_test_preclose = False
     applied_test_postopen = False
 
-    # Test overrides: first refresh sets now+N and latches that absolute time. Later refreshes
-    # must keep the latched datetimes — otherwise IB recomputation overwrites them every ~20s.
-    if prev.get("_test_preclose_locked") and isinstance(prev.get("next_preclose"), datetime):
-        next_preclose = prev["next_preclose"]
+    # Test latch: keep now+N only until that moment has arrived; then drop latch so IB recomputes
+    # the real next preclose/postopen (otherwise cache stays stuck in the past forever).
+    prev_pc = prev.get("next_preclose")
+    keep_preclose_latch = (
+        bool(prev.get("_test_preclose_locked"))
+        and isinstance(prev_pc, datetime)
+        and prev_pc > now_local
+    )
+    prev_po = prev.get("next_postopen")
+    keep_postopen_latch = (
+        bool(prev.get("_test_postopen_locked"))
+        and isinstance(prev_po, datetime)
+        and prev_po > now_local
+    )
+
+    if keep_preclose_latch:
+        next_preclose = prev_pc
     else:
         next_preclose = sess_close - pre_delta
         if len(sessions) >= 2 and now_local > next_preclose:
@@ -533,8 +546,8 @@ def refresh_symbol_next_window(
             except (TypeError, ValueError):
                 logger.warning("[NEXT_WINDOW][TEST] Invalid TEST_NEXT_PRECLOSE_MIN=%r", test_preclose_raw)
 
-    if prev.get("_test_postopen_locked") and isinstance(prev.get("next_postopen"), datetime):
-        next_postopen = prev["next_postopen"]
+    if keep_postopen_latch:
+        next_postopen = prev_po
     else:
         curr_postopen = sess_open + post_delta
         if now_local > curr_postopen and idx + 1 < len(sessions):
@@ -557,8 +570,8 @@ def refresh_symbol_next_window(
         "session_close": sess_close,
         "session_index": idx,
         "updated_at": now_local,
-        "_test_preclose_locked": bool(prev.get("_test_preclose_locked")) or applied_test_preclose,
-        "_test_postopen_locked": bool(prev.get("_test_postopen_locked")) or applied_test_postopen,
+        "_test_preclose_locked": keep_preclose_latch or applied_test_preclose,
+        "_test_postopen_locked": keep_postopen_latch or applied_test_postopen,
     }
     _merge_known_symbol_timezone(symbol, tz_name)
     with _symbol_next_window_lock:
