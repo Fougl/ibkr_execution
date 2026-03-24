@@ -496,13 +496,21 @@ def refresh_symbol_next_window(
     post_delta = timedelta(minutes=settings.post_open_min)
     pre_delta = timedelta(minutes=settings.pre_close_min)
 
-    idx = 0
+    # Prefer session whose close is still in the future; else next session that has not opened yet
+    # (avoids sticking to today's already-closed segment when IB lists multiple days).
+    idx = len(sessions) - 1
+    chosen: int | None = None
     for i, (_o, c, _tz) in enumerate(sessions):
         if c > now_local:
-            idx = i
+            chosen = i
             break
-    else:
-        idx = len(sessions) - 1
+    if chosen is None:
+        for i, (o, c, _tz) in enumerate(sessions):
+            if o > now_local:
+                chosen = i
+                break
+    if chosen is not None:
+        idx = chosen
 
     sess_open, sess_close, tz_name = sessions[idx]
 
@@ -517,9 +525,12 @@ def refresh_symbol_next_window(
 
     applied_test_preclose = False
     applied_test_postopen = False
+    preclose_test_used = bool(prev.get("_test_preclose_consumed"))
+    postopen_test_used = bool(prev.get("_test_postopen_consumed"))
 
-    # Test latch: keep now+N only until that moment has arrived; then drop latch so IB recomputes
-    # the real next preclose/postopen (otherwise cache stays stuck in the past forever).
+    # Test latch: keep now+N only until that moment has arrived. After that, do not re-apply
+    # hardcoded minutes every refresh — that would hide the real next-day IB windows. One shot per
+    # side until TEST_NEXT_WINDOW_RESET clears prev.
     prev_pc = prev.get("next_preclose")
     keep_preclose_latch = (
         bool(prev.get("_test_preclose_locked"))
@@ -539,7 +550,7 @@ def refresh_symbol_next_window(
         next_preclose = sess_close - pre_delta
         if len(sessions) >= 2 and now_local > next_preclose:
             next_preclose = sessions[1][1] - pre_delta
-        if test_preclose_raw:
+        if test_preclose_raw and not preclose_test_used:
             try:
                 next_preclose = now_local + timedelta(minutes=int(test_preclose_raw))
                 applied_test_preclose = True
@@ -554,7 +565,7 @@ def refresh_symbol_next_window(
             next_postopen = sessions[idx + 1][0] + post_delta
         else:
             next_postopen = curr_postopen
-        if test_postopen_raw:
+        if test_postopen_raw and not postopen_test_used:
             try:
                 next_postopen = now_local + timedelta(minutes=int(test_postopen_raw))
                 applied_test_postopen = True
@@ -572,6 +583,8 @@ def refresh_symbol_next_window(
         "updated_at": now_local,
         "_test_preclose_locked": keep_preclose_latch or applied_test_preclose,
         "_test_postopen_locked": keep_postopen_latch or applied_test_postopen,
+        "_test_preclose_consumed": preclose_test_used or applied_test_preclose,
+        "_test_postopen_consumed": postopen_test_used or applied_test_postopen,
     }
     _merge_known_symbol_timezone(symbol, tz_name)
     with _symbol_next_window_lock:
