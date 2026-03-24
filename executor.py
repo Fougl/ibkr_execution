@@ -520,8 +520,10 @@ def refresh_symbol_next_window(
     if os.getenv("TEST_NEXT_WINDOW_RESET", "").strip().lower() in ("1", "true", "yes"):
         prev = {}
 
-    test_preclose_raw = 1
-    test_postopen_raw = 3
+    # Testing: set env TEST_NEXT_PRECLOSE_MIN / TEST_NEXT_POSTOPEN_MIN to positive integers for now+N
+    # minutes (one-shot per symbol until latch expires). Leave unset in production.
+    test_preclose_raw = (os.getenv("TEST_NEXT_PRECLOSE_MIN", "") or "").strip()
+    test_postopen_raw = (os.getenv("TEST_NEXT_POSTOPEN_MIN", "") or "").strip()
 
     applied_test_preclose = False
     applied_test_postopen = False
