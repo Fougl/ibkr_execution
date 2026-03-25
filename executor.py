@@ -247,6 +247,54 @@ def delete_last_webhook_for_symbol(local_symbol: str) -> None:
             logger.warning("[LAST_WEBHOOKS] Failed deleting webhook for %s: %s", local_symbol, e)
 
 
+def should_persist_last_webhook(sig: "Signal", payload: Dict[str, Any]) -> bool:
+    """
+    Decide whether to overwrite LAST_WEBHOOKS_PATH for this symbol.
+
+    Rule:
+    - For EXIT alerts, if the previously saved webhook is an opposite-direction ENTRY,
+      do not overwrite it.
+    - Uses alert text only (not desired_qty/desired_direction fields in payload).
+    """
+    try:
+        if not sig or not sig.symbol:
+            return False
+
+        def _dir_from_alert(a: str) -> int | None:
+            s = str(a or "").strip().lower()
+            if (("entry" in s or "enter" in s) and "long" in s) or s in ("long", "buy", "enter long", "entry long"):
+                return 1
+            if (("entry" in s or "enter" in s) and "short" in s) or s in ("short", "sell", "enter short", "entry short"):
+                return -1
+            return None
+
+        def _is_exit_alert(a: str) -> bool:
+            s = str(a or "").strip().lower()
+            return ("exit long" in s) or ("exit short" in s) or ("exit sell" in s)
+
+        curr_alert = str(getattr(sig, "raw_alert", "") or "")
+        if not _is_exit_alert(curr_alert):
+            return True
+
+        prev = load_last_webhook_for_symbol(sig.symbol)
+        if not isinstance(prev, dict):
+            return True
+
+        prev_alert = str(prev.get("alert", "") or "")
+        prev_dir = _dir_from_alert(prev_alert)
+        curr_dir = _dir_from_alert(curr_alert)
+        if prev_dir is None or curr_dir is None:
+            return True
+
+        # Opposite-direction ENTRY exists -> keep it, do not overwrite with EXIT.
+        if prev_dir == -curr_dir:
+            return False
+        return True
+    except Exception:
+        # Fail-open: if guard logic fails, keep current behavior and persist payload.
+        return True
+
+
 def _upsert_known_symbol(local_symbol: str, exchange: str | None) -> bool:
     """
     Update in-memory known-symbols cache and persist KNOWN_SYMBOLS_PATH.
@@ -2659,9 +2707,16 @@ def webhook() -> Any:
         settings = settings_cache.get()
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         sig = parse_signal(payload)
-        # Always persist the last webhook per IB localSymbol
-        # so POSTOPEN can re-execute the original ENTRY signal.
-        save_last_webhook_for_symbol(sig.symbol, payload)
+        # Persist last webhook per symbol for POSTOPEN replay.
+        # Guard: do not overwrite with EXIT when previous saved webhook is opposite ENTRY.
+        if should_persist_last_webhook(sig, payload):
+            save_last_webhook_for_symbol(sig.symbol, payload)
+        else:
+            logger.info(
+                "[LAST_WEBHOOKS] Skip save for symbol=%s alert=%s (opposite-direction entry already saved)",
+                sig.symbol,
+                sig.raw_alert,
+            )
         # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
         #with IB_LOCK:
         symbol_was_new = register_symbol_usage_from_signal(sig)
