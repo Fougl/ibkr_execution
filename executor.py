@@ -260,7 +260,7 @@ def should_persist_last_webhook(sig: "Signal", payload: Dict[str, Any]) -> bool:
         if not sig or not sig.symbol:
             return False
 
-        def _dir_from_alert(a: str) -> int | None:
+        def _entry_dir_from_alert(a: str) -> int | None:
             s = str(a or "").strip().lower()
             if (("entry" in s or "enter" in s) and "long" in s) or s in ("long", "buy", "enter long", "entry long"):
                 return 1
@@ -268,12 +268,17 @@ def should_persist_last_webhook(sig: "Signal", payload: Dict[str, Any]) -> bool:
                 return -1
             return None
 
-        def _is_exit_alert(a: str) -> bool:
+        def _exit_side_from_alert(a: str) -> int | None:
             s = str(a or "").strip().lower()
-            return ("exit long" in s) or ("exit short" in s) or ("exit sell" in s)
+            if "exit long" in s:
+                return 1
+            if ("exit short" in s) or ("exit sell" in s):
+                return -1
+            return None
 
         curr_alert = str(getattr(sig, "raw_alert", "") or "")
-        if not _is_exit_alert(curr_alert):
+        exit_side = _exit_side_from_alert(curr_alert)
+        if exit_side is None:
             return True
 
         prev = load_last_webhook_for_symbol(sig.symbol)
@@ -281,13 +286,15 @@ def should_persist_last_webhook(sig: "Signal", payload: Dict[str, Any]) -> bool:
             return True
 
         prev_alert = str(prev.get("alert", "") or "")
-        prev_dir = _dir_from_alert(prev_alert)
-        curr_dir = _dir_from_alert(curr_alert)
-        if prev_dir is None or curr_dir is None:
+        prev_dir = _entry_dir_from_alert(prev_alert)
+        if prev_dir is None:
             return True
 
-        # Opposite-direction ENTRY exists -> keep it, do not overwrite with EXIT.
-        if prev_dir == -curr_dir:
+        # EXIT should not overwrite when previous saved webhook is opposite ENTRY.
+        # Examples:
+        # - Exit Short should not overwrite Entry Long
+        # - Exit Long should not overwrite Entry Short
+        if prev_dir == -exit_side:
             return False
         return True
     except Exception:
