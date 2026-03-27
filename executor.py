@@ -2713,7 +2713,18 @@ def webhook() -> Any:
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
         settings = settings_cache.get()
         # logger.info(f"FILL_TIME: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
-        sig = parse_signal(payload)
+        try:
+            sig = parse_signal(payload)
+        except ValueError as e:
+            # Treat malformed/unsupported webhook formats as acknowledged to
+            # avoid endless upstream redelivery loops (SQS/Lambda/API retries).
+            log_trade_event({
+                "event": "invalid_webhook_format",
+                "error": str(e),
+                "payload": payload,
+            })
+            logger.warning("[WEBHOOK] Ignoring invalid webhook format: %s payload=%s", e, payload)
+            return jsonify({"ok": True, "ignored": True, "reason": "invalid_webhook_format", "error": str(e)}), 200
         # Persist last webhook per symbol for POSTOPEN replay.
         # Guard: do not overwrite with EXIT when previous saved webhook is opposite ENTRY.
         if should_persist_last_webhook(sig, payload):
