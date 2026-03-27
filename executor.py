@@ -579,8 +579,8 @@ def refresh_symbol_next_window(
     # minutes (one-shot per symbol until latch expires). Leave unset in production.
     test_preclose_raw = (os.getenv("TEST_NEXT_PRECLOSE_MIN", "") or "").strip()
     test_postopen_raw = (os.getenv("TEST_NEXT_POSTOPEN_MIN", "") or "").strip()
-    test_preclose_raw = 1
-    test_postopen_raw = 2
+    #test_preclose_raw = 1
+    #test_postopen_raw = 2
 
     applied_test_preclose = False
     applied_test_postopen = False
@@ -2802,7 +2802,7 @@ def webhook() -> Any:
         log_trade_event({"error": str(e)})
         logger.exception(
             f"[ALARM] Webhook handling failed. payload={payload} err={e}")
-        return jsonify({"ok": False, "error": str(e)}), 400
+        return jsonify({"ok": True, "error": str(e)}), 400
     #finally:
         # 🔥 CRITICAL — disconnect exactly once
         # try:
