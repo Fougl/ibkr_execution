@@ -672,14 +672,40 @@ except Exception as e:
 
 
 os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+
+
+class _IbApiNoiseFilter(logging.Filter):
+    """
+    Drop noisy ibapi/ib_insync ERROR spam that still happens while the socket looks "up".
+    - 1100: we log once via _attach_ib_session_handlers + watchdog / reconnect.
+    - 200 + no security definition: scheduler/webhook may retry bad contracts; we log at WARNING in app code.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "Error 1100," in msg:
+            return False
+        if "Error 200," in msg and "No security definition" in msg:
+            return False
+        return True
+
+
+_ib_noise_filter = _IbApiNoiseFilter()
 logging.getLogger("ib_insync").setLevel(logging.ERROR)
 logging.getLogger("ibapi").setLevel(logging.ERROR)
+logging.getLogger("ib_insync").addFilter(_ib_noise_filter)
+logging.getLogger("ibapi").addFilter(_ib_noise_filter)
+
 logger = logging.getLogger()  # CLEAN: no redundant logger name prefix
 logger.setLevel(logging.INFO)
 
 handler = logging.FileHandler(LOG_PATH, mode="a")
 formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
 handler.setFormatter(formatter)
+handler.addFilter(_ib_noise_filter)
 
 logger.handlers = [handler]    # IMPORTANT: removes stdout handler
 logger.propagate = False
@@ -730,6 +756,39 @@ signal.signal(signal.SIGINT, shutdown_handler)
 atexit.register(shutdown_handler)
 
 
+def _attach_ib_session_handlers(ib: IB) -> None:
+    """
+    IB error 1100 = lost link between TWS/Gateway and IB servers. The local API
+    socket often still reports isConnected()==True, so the watchdog alone does not
+    see a disconnect. We clear IB_READY so the watchdog alarms and runs reconnect.
+    """
+    def on_error(reqId, errorCode, errorString, *args):
+        if errorCode == 1100:
+            logger.error(
+                "[ALARM] IB connectivity lost (1100 reqId=%s): %s",
+                reqId,
+                errorString,
+            )
+            IB_READY.clear()
+        elif errorCode in (1101, 1102):
+            if IB_INSTANCE is ib and ib.isConnected():
+                IB_READY.set()
+                logger.info(
+                    "[IB] IB connectivity restored (%s reqId=%s): %s",
+                    errorCode,
+                    reqId,
+                    errorString,
+                )
+
+    def on_disconnected():
+        if IB_INSTANCE is ib:
+            logger.error("[ALARM] IB API disconnected from TWS/Gateway")
+            IB_READY.clear()
+
+    ib.errorEvent += on_error
+    ib.disconnectedEvent += on_disconnected
+
+
 async def ib_connect_persistent():
     """
     Connect to IB gateway. Retries until connected or 2 minutes have elapsed.
@@ -753,6 +812,7 @@ async def ib_connect_persistent():
                 timeout=5
             )
             IB_INSTANCE = ib
+            _attach_ib_session_handlers(ib)
             IB_READY.set()
             logger.info("[IB] Persistent async connection established (attempt %d)", attempt)
             return
@@ -814,6 +874,7 @@ async def _ib_reconnect_async():
                     timeout=5
                 )
                 IB_INSTANCE = ib
+                _attach_ib_session_handlers(ib)
                 IB_READY.set()
                 logger.info("[IB] Reconnect successful (attempt %d)", attempt)
                 return
@@ -852,6 +913,11 @@ def run_ib(coro, timeout=10):
     return future.result(timeout=timeout)
 
 def ib_connection_watchdog():
+    """
+    Polls every 5s (after 120s startup grace). When disconnected (including IB_READY clear
+    from error 1100), logs [ALARM] IB disconnected and schedules _ib_reconnect_async() on
+    IB_LOOP (cooldown 65s). Reconnect implementation: _ib_reconnect_async() above.
+    """
     last_logged_state = None
     last_disconnect_reminder = 0.0
     last_reconnect_scheduled = 0.0
@@ -2609,9 +2675,10 @@ def background_scheduler_loop():
     if not symbols:
         symbols = []
 
-    for sym, ex in symbols:
-        if USE_SYMBOL_NEXT_WINDOW_CACHE:
-            refresh_symbol_next_window(sym, settings, exchange=ex)
+    if IB_READY.is_set():
+        for sym, ex in symbols:
+            if USE_SYMBOL_NEXT_WINDOW_CACHE:
+                refresh_symbol_next_window(sym, settings, exchange=ex)
         #rebuild_symbol_market_timeline(sym, settings)
     while True:
         try:
@@ -2661,8 +2728,9 @@ def background_scheduler_loop():
             if not symbols:
                 symbols = []
 
-            for sym, ex in symbols:
-                refresh_symbol_next_window(sym, settings, exchange=ex)
+            if IB_READY.is_set():
+                for sym, ex in symbols:
+                    refresh_symbol_next_window(sym, settings, exchange=ex)
 
         except Exception as e:
             logger.info(f"Scheduler error: {e}")
