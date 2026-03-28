@@ -677,17 +677,26 @@ os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
 class _IbApiNoiseFilter(logging.Filter):
     """
     Drop noisy ibapi/ib_insync ERROR spam that still happens while the socket looks "up".
-    - 1100: we log once via _attach_ib_session_handlers + watchdog / reconnect.
+    - 1100: we log via _attach_ib_session_handlers + watchdog / reconnect.
     - 200 + no security definition: scheduler/webhook may retry bad contracts; we log at WARNING in app code.
+    - connect-time sync timeouts from ib_insync (duplicative when gateway is down/slow).
     """
+
+    _DROP_SUBSTRINGS = (
+        "Error 1100,",
+        "positions request timed out",
+        "open orders request timed out",
+        "completed orders request timed out",
+    )
 
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
         except Exception:
             return True
-        if "Error 1100," in msg:
-            return False
+        for s in self._DROP_SUBSTRINGS:
+            if s in msg:
+                return False
         if "Error 200," in msg and "No security definition" in msg:
             return False
         return True
@@ -2675,10 +2684,9 @@ def background_scheduler_loop():
     if not symbols:
         symbols = []
 
-    if IB_READY.is_set():
-        for sym, ex in symbols:
-            if USE_SYMBOL_NEXT_WINDOW_CACHE:
-                refresh_symbol_next_window(sym, settings, exchange=ex)
+    for sym, ex in symbols:
+        if USE_SYMBOL_NEXT_WINDOW_CACHE:
+            refresh_symbol_next_window(sym, settings, exchange=ex)
         #rebuild_symbol_market_timeline(sym, settings)
     while True:
         try:
