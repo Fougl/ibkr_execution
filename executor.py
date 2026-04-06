@@ -1363,13 +1363,16 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
 
     a = alert.lower()
 
-    # NEW: read signal timestamp from JSON
-    signal_ts = payload.get("signalTimestamp")
-    try:
-        signal_ts = float(signal_ts)
-        signal_ts = parse_timestamp(signal_ts)
-    except:
-        signal_ts = None
+    # signalTimestamp: unix seconds/ms (numeric) or ISO8601 ("2026-02-12T14:35:00Z").
+    # float() first would drop ISO strings — fall back to parse_timestamp on the raw value.
+    signal_ts_raw = payload.get("signalTimestamp")
+    signal_ts = None
+    if signal_ts_raw is not None and str(signal_ts_raw).strip() != "":
+        try:
+            as_float = float(signal_ts_raw)
+            signal_ts = parse_timestamp(as_float)
+        except (TypeError, ValueError):
+            signal_ts = parse_timestamp(signal_ts_raw)
 
     # Accept qty aliases: qty / quantity / size
     qty = payload.get("qty", payload.get(
@@ -2379,7 +2382,6 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
             except:
                 sig_age = None
         # log_step( f"[EXEC] Signal timestamp {sig.signal_timestamp}  {int(settings.execution_delay)}")
-        allow_entry = False
         allow_entry = True
         if sig.desired_direction != 0 and sig_age is not None:
             if sig_age > int(settings.execution_delay):
@@ -2856,7 +2858,7 @@ def webhook() -> Any:
             )
 
         # market hours gating (cache-based new logic, legacy fallback preserved above)
-        if USE_SYMBOL_NEXT_WINDOW_CACHE and preclose_dt > reopen_dt:
+        if preclose_dt > reopen_dt:
             logger.info(
                 f"[CHECK] GATE outside_market_hours symbol={sig.symbol} now={now_local.isoformat()} "
                 f"next_postopen={reopen_dt.isoformat()} next_preclose={preclose_dt.isoformat()} "
