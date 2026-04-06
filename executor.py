@@ -528,8 +528,8 @@ def refresh_symbol_next_window(
     """
     Per-symbol cache with only:
     - next_postopen (open + post_open_min, possibly from next session if already passed)
-    - next_preclose (close - pre_close_min of idx session; if now already past that time,
-      use sessions[1] close — IB first segment can be stale)
+    - next_preclose (close - pre_close_min of idx session; if now is past that pre-close but
+      still before idx session close, use sessions[idx+1] close — avoids scheduler re-firing)
     - timezone
     """
     if not symbol:
@@ -607,8 +607,15 @@ def refresh_symbol_next_window(
         next_preclose = prev_pc
     else:
         next_preclose = sess_close - pre_delta
-        if len(sessions) >= 2 and now_local > next_preclose:
-            next_preclose = sessions[1][1] - pre_delta
+        # Past this session's pre-close instant but still before its official close: don't keep
+        # next_preclose stuck on the current session (scheduler would see preclose_dt <= now until
+        # the close). Shift to the *next* IB session's pre-close (sessions[idx+1]), not always [1].
+        if (
+            idx + 1 < len(sessions)
+            and now_local > next_preclose
+            and now_local < sess_close
+        ):
+            next_preclose = sessions[idx + 1][1] - pre_delta
         if test_preclose_raw and not preclose_test_used:
             try:
                 next_preclose = now_local + timedelta(minutes=int(test_preclose_raw))
