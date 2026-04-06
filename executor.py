@@ -2808,24 +2808,15 @@ def webhook() -> Any:
             })
             logger.warning("[WEBHOOK] Ignoring invalid webhook format: %s payload=%s", e, payload)
             return jsonify({"ok": True, "ignored": True, "reason": "invalid_webhook_format", "error": str(e)}), 200
-        # Persist last webhook per symbol for POSTOPEN replay.
-        # Guard: do not overwrite with EXIT when previous saved webhook is opposite ENTRY.
-        if should_persist_last_webhook(sig, payload):
-            save_last_webhook_for_symbol(sig.symbol, payload)
-        else:
-            logger.info(
-                "[LAST_WEBHOOKS] Skip save for symbol=%s alert=%s (opposite-direction entry already saved)",
-                sig.symbol,
-                sig.raw_alert,
-            )
-        # Track which IB-mapped symbols we have seen so we can refresh tradingHours weekly
-        #with IB_LOCK:
+
         symbol_was_new = register_symbol_usage_from_signal(sig)
-        # logger.info(
-        #     f"[HTTP] Received Tradin View alert={sig.raw_alert} symbol={sig.symbol} desired_dir={sig.desired_direction} desired_qty={sig.desired_qty} take_profit={sig.take_profit} stop_loss={sig.stop_loss}")
 
         now_local = now_in_market_tz(settings, symbol=sig.symbol)
         ex = getattr(sig, "exchange", None)
+        preclose_dt = None
+        reopen_dt = None
+        skip_save_outside_session = False
+
         if USE_SYMBOL_NEXT_WINDOW_CACHE:
             # Only call refresh_symbol_next_window on first-seen symbol; otherwise use next-window cache.
             if symbol_was_new is True:
@@ -2841,11 +2832,31 @@ def webhook() -> Any:
                 return jsonify({"ok": True, "ignored": True, "reason": "trading_hours_unavailable"}), 200
             reopen_dt = row["next_postopen"]
             preclose_dt = row["next_preclose"]
-        
+            if preclose_dt > reopen_dt and now_local < row["session_open"]:
+                skip_save_outside_session = True
 
+        # Persist last webhook per symbol for POSTOPEN replay.
+        # Guard: do not overwrite with EXIT when previous saved webhook is opposite ENTRY.
+        # Guard: do not save before session_open when we're in the outside_market window (preclose_dt > reopen_dt).
+        if should_persist_last_webhook(sig, payload):
+            if skip_save_outside_session:
+                logger.info(
+                    "[LAST_WEBHOOKS] Skip save for symbol=%s alert=%s "
+                    "(now < session_open and preclose_dt>reopen_dt; postopen replay not applicable)",
+                    sig.symbol,
+                    sig.raw_alert,
+                )
+            else:
+                save_last_webhook_for_symbol(sig.symbol, payload)
+        else:
+            logger.info(
+                "[LAST_WEBHOOKS] Skip save for symbol=%s alert=%s (opposite-direction entry already saved)",
+                sig.symbol,
+                sig.raw_alert,
+            )
 
         # market hours gating (cache-based new logic, legacy fallback preserved above)
-        if preclose_dt > reopen_dt:
+        if USE_SYMBOL_NEXT_WINDOW_CACHE and preclose_dt > reopen_dt:
             logger.info(
                 f"[CHECK] GATE outside_market_hours symbol={sig.symbol} now={now_local.isoformat()} "
                 f"next_postopen={reopen_dt.isoformat()} next_preclose={preclose_dt.isoformat()} "
