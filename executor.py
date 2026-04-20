@@ -1352,8 +1352,14 @@ def parse_signal(payload: Dict[str, Any]) -> Signal:
         year_last = m.group(3)[-1]   # "2026" → "6"
         symbol = f"{root}{month}{year_last}"
     else:
-        # fallback: use raw
-        symbol = symbol_raw
+        # Roots with digits (e.g. Micro Russell M2K): IB localSymbol is M2KM6, not M2KM2026.
+        # Last month code before a 4-digit 20xx year, non-letter root.
+        m2 = re.match(r"^(.+)([FGHJKMNQUVXZ])((?:20)\d{2})$", symbol_raw)
+        if m2:
+            y4 = m2.group(3)
+            symbol = f"{m2.group(1)}{m2.group(2)}{y4[-1]}"
+        else:
+            symbol = symbol_raw
     exchange_raw = str(payload.get("exchange", "")).strip()
     # logger.info(
     #     f"[DBG_PARSE] RAW symbol={symbol_raw!r} RAW exchange={exchange_raw!r}")
