@@ -2423,12 +2423,12 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 # close_position(contract, qty)
                 # time.sleep(1)
 
-                result.update(
-                    {"ok": False, "action": "exit_failed_after_retry"})
+                #result.update(
+                #    {"ok": False, "action": "exit_failed_after_retry"})
                 # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
                 # IB_INSTANCE.disconnect()
-                flush_account_log("WEBHOOK_EXEC")
-                return result
+                #flush_account_log("WEBHOOK_EXEC")
+                #return result
             cancel_all_open_orders(IB_INSTANCE,
                                    reason="exit_signal",
                                    contract=contract
@@ -2454,11 +2454,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     # close_position(contract, qty)
                     # time.sleep(1)
 
-                    result.update(
-                        {"ok": False, "action": "exit_failed_after_retry"})
+                    #result.update(
+                    #    {"ok": False, "action": "exit_failed_after_retry"})
 
-                    flush_account_log("WEBHOOK_EXEC")
-                    return result
+                    #flush_account_log("WEBHOOK_EXEC")
+                    #return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_long", contract=contract)
                 result.update({"ok": True, "action": "exit_long_closed"})
@@ -2486,11 +2486,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                     log_step("[ALARM] Exit close not reflected — retrying")
 
 
-                    result.update(
-                        {"ok": False, "action": "exit_failed_after_retry"})
+                    #result.update(
+                    #    {"ok": False, "action": "exit_failed_after_retry"})
 
-                    flush_account_log("WEBHOOK_EXEC")
-                    return result
+                    #flush_account_log("WEBHOOK_EXEC")
+                    #return result
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_short", contract=contract)
                 result.update({"ok": True, "action": "exit_short_closed"})
@@ -2528,11 +2528,11 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 log_step(
                     "[ALARM] Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
  
-                result.update(
-                    {"ok": False, "action": "reversal_close_not_confirmed"})
+                #result.update(
+                #    {"ok": False, "action": "reversal_close_not_confirmed"})
 
-                flush_account_log("WEBHOOK_EXEC")
-                return result
+                #flush_account_log("WEBHOOK_EXEC")
+                #return result
             cancel_all_open_orders(
                 IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
 
