@@ -1541,11 +1541,11 @@ def _wait_trade_market_filled(trade, total_qty: int, deadline_sec: float | None 
     while time.time() < t_end:
         if getattr(trade, "fills", None):
             fill_price = float(trade.fills[-1].execution.price)
-        os = getattr(trade, "orderStatus", None)
-        if os is not None:
-            st = (getattr(os, "status", None) or "").upper()
-            filled = int(float(getattr(os, "filled", 0) or 0))
-            rem_raw = getattr(os, "remaining", None)
+        order_status = getattr(trade, "orderStatus", None)
+        if order_status is not None:
+            st = (getattr(order_status, "status", None) or "").upper()
+            filled = int(float(getattr(order_status, "filled", 0) or 0))
+            rem_raw = getattr(order_status, "remaining", None)
             try:
                 rem = int(float(rem_raw)) if rem_raw is not None else None
             except (TypeError, ValueError):
@@ -1564,10 +1564,10 @@ def _wait_trade_market_filled(trade, total_qty: int, deadline_sec: float | None 
 
         time.sleep(poll)
 
-    os = getattr(trade, "orderStatus", None)
-    st = getattr(os, "status", None) if os else None
-    filled = int(float(getattr(os, "filled", 0) or 0)) if os else 0
-    rem = getattr(os, "remaining", None) if os else None
+    order_status = getattr(trade, "orderStatus", None)
+    st = getattr(order_status, "status", None) if order_status else None
+    filled = int(float(getattr(order_status, "filled", 0) or 0)) if order_status else 0
+    rem = getattr(order_status, "remaining", None) if order_status else None
     raise RuntimeError(
         f"fill_timeout status={st!r} filled={filled} remaining={rem!r} expected={total}"
     )
@@ -2381,6 +2381,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 try:
                     c = t.contract
                     o = t.order
+                    qty_ord=getattr(o,'totalQuantity',None)
                     # os = t.orderState
 
                     log_step(
@@ -2390,7 +2391,7 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                             f"qty={getattr(o,'totalQuantity',None)}"
                         ])
                     )
-                    log_trade_event({"before trade state_check":  "opened_orders", "direction": getattr(o,'action',None), "order_type": getattr(o,'orderType',None), "quantity": qty})
+                    log_trade_event({"before trade state_check":  "opened_orders", "direction": getattr(o,'action',None), "order_type": getattr(o,'orderType',None), "quantity": qty_ord})
                 except Exception as e:
                     log_step(f"ERROR printing open order: {e}")
                     raise
