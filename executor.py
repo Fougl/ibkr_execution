@@ -93,8 +93,6 @@ BIND_PORT = int(os.getenv("BIND_PORT", "5001"))
 # Dedupe window
 DEDUPE_TTL_SEC = int(os.getenv("DEDUPE_TTL_SEC", "15"))
 
-# Retry behavior
-MAX_STATE_CHECKS = int(os.getenv("MAX_STATE_CHECKS", "15"))
 DEFAULT_QTY = int(os.getenv("DEFAULT_QTY", "1"))
 
 
@@ -1527,6 +1525,54 @@ def current_position_qty(IB_INSTANCE, contract: Contract) -> int:
     return qty
 
 
+def _wait_trade_market_filled(trade, total_qty: int, deadline_sec: float | None = None) -> float:
+    """
+    Wait for this single market order to finish from IB's orderStatus (not positions()).
+    Returns last fill price. Raises RuntimeError on timeout, cancel/reject, or underfill.
+    """
+    total = abs(int(total_qty))
+    if total <= 0:
+        raise RuntimeError("market_order_zero_qty")
+    wait_sec = float(deadline_sec if deadline_sec is not None else float(os.getenv("MARKET_ORDER_WAIT_SEC", "30")))
+    t_end = time.time() + wait_sec
+    fill_price: float | None = None
+    poll = float(os.getenv("MARKET_ORDER_POLL_SEC", "0.05"))
+
+    while time.time() < t_end:
+        if getattr(trade, "fills", None):
+            fill_price = float(trade.fills[-1].execution.price)
+        os = getattr(trade, "orderStatus", None)
+        if os is not None:
+            st = (getattr(os, "status", None) or "").upper()
+            filled = int(float(getattr(os, "filled", 0) or 0))
+            rem_raw = getattr(os, "remaining", None)
+            try:
+                rem = int(float(rem_raw)) if rem_raw is not None else None
+            except (TypeError, ValueError):
+                rem = None
+
+            if st in ("CANCELLED", "APICANCELLED", "INACTIVE", "REJECTED"):
+                raise RuntimeError(f"market_order_{st.lower()}")
+            if st == "FILLED" and filled >= total and (rem is None or rem == 0):
+                if fill_price is None and getattr(trade, "fills", None):
+                    fill_price = float(trade.fills[-1].execution.price)
+                if fill_price is None:
+                    raise RuntimeError("filled_no_price")
+                return fill_price
+            if trade.isDone() and st == "FILLED" and (rem is None or rem == 0) and filled < total:
+                raise RuntimeError(f"market_order_underfilled filled={filled} expected={total}")
+
+        time.sleep(poll)
+
+    os = getattr(trade, "orderStatus", None)
+    st = getattr(os, "status", None) if os else None
+    filled = int(float(getattr(os, "filled", 0) or 0)) if os else 0
+    rem = getattr(os, "remaining", None) if os else None
+    raise RuntimeError(
+        f"fill_timeout status={st!r} filled={filled} remaining={rem!r} expected={total}"
+    )
+
+
 def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str = "close_position") -> float | None:
     action = "SELL" if qty > 0 else "BUY"
     log_step(f"CLOSE_POSITION: sending {action} {abs(qty)}")
@@ -1543,20 +1589,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str 
     try:
         order = MarketOrder(action, abs(int(qty)))
         trade = run_ib(ib_place_order(contract, order))
-    
-        timeout = time.time() + 30
-        fill_price = None
-        
-        while time.time() < timeout:
-        
-            if trade.isDone() or trade.fills:
-                if trade.fills:
-                    fill_price = trade.fills[-1].execution.price
-                break
-    
-        
-        if not fill_price:
-            raise RuntimeError("fill_timeout")
+        fill_price = _wait_trade_market_filled(trade, abs(int(qty)))
 
         #log_trade_event({"trade": "success", "fill_price": fill_price, "action": "close"})
         log_trade_event({"trade reason": trade_reason, "trade direction": action, "fill_price": fill_price})
@@ -1577,7 +1610,7 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str 
             remaining = None
             log_msgs = []
 
-        if "TimeoutError" in str(e) or str(e) in ("fill_timeout", "close_position_fill_timeout"):
+        if "TimeoutError" in str(e) or "fill_timeout" in str(e).lower() or str(e) in ("close_position_fill_timeout",):
             log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
             log_step(
                 f"[CLOSE_DEBUG] status={status_text} remaining={remaining} "
@@ -1603,9 +1636,6 @@ def close_position(IB_INSTANCE, contract: Contract, qty: int, trade_reason: str 
                 "log_msgs": [str(m) for m in log_msgs],
             })
         raise
-    log_step("[ALARM] CLOSE_POSITION_FAIL no fills within timeout")
-    log_trade_event({"trade": "fail", "reason": "close_fill_timeout", "fill_price": None})
-    raise RuntimeError("close_position_fill_timeout")
     # # More robust wait loop: IB updates positions asynchronously
     # for i in range(15):      # ~15 seconds worst-case
     #     # IB_INSTANCE.waitOnUpdate(timeout=1.0)   # consume API messages
@@ -1709,27 +1739,12 @@ def open_position_with_brackets(IB_INSTANCE,
     #log_step("PARENT_ORDER_SUBMITTED")
 
     # ------------------------------------------------
-    # 2️⃣ WAIT FOR FILL
+    # 2️⃣ WAIT FOR FILL (orderStatus on this trade, not positions())
     # ------------------------------------------------
     fill_price = None
-    timeout = time.time() + 10
 
     try:
-        timeout = time.time() + 30
-        fill_price = None
-        
-        while time.time() < timeout:
-        
-            if trade.isDone() or trade.fills:
-                if trade.fills:
-                    fill_price = trade.fills[-1].execution.price
-                break
-        
-            #time.sleep(0.05)
-        
-        # if not fill_price:
-        #     raise RuntimeError("fill_timeout")
-
+        fill_price = _wait_trade_market_filled(trade, abs(int(qty)))
 
     except Exception:
         log_step("[ALARM] FILL_FAIL: parent not filled")
@@ -1812,15 +1827,17 @@ def open_position_with_brackets(IB_INSTANCE,
         log_step("[ALARM] No orders were opened")
 
 
-def wait_until_flat(IB_INSTANCE, contract: Contract, settings: Settings) -> bool:
-    for i in range(MAX_STATE_CHECKS):
-        qty = current_position_qty(IB_INSTANCE, contract)
-        if qty == 0:
-            return True
-        # logger.info(f"Waiting for close to reflect (attempt {i+1}/{MAX_STATE_CHECKS}), qty still {qty}")
-        # IB_INSTANCE.sleep(0.1)
-        # time.sleep(1)
-    return False
+def _log_position_feed_if_nonzero(IB_INSTANCE, contract: Contract, context: str) -> None:
+    """Diagnostic only — never used to fire a second close (position stream can lag)."""
+    try:
+        q = current_position_qty(IB_INSTANCE, contract)
+        if q != 0:
+            log_step(
+                f"[ALARM] {context}: position feed still shows qty={q} "
+                f"(no extra market close from position state)"
+            )
+    except Exception as e:
+        log_step(f"[ALARM] {context}: position read error: {e}")
 
 def qualify_contract(contract):
 
@@ -2019,6 +2036,11 @@ def ensure_preclose_close_if_needed(IB_INSTANCE, settings: Settings, symbol_filt
                 # We still call close_position (which returns the close fill),
                 # but for state we persist the *entry* average price from the
                 # snapshot above, not the close fill.
+                cancel_all_open_orders(
+                    IB_INSTANCE,
+                    reason="preclose_cancel_working",
+                    contract=c,
+                )
                 close_position(IB_INSTANCE, c, q, "preclose closing")
 
         # IB_INSTANCE.disconnect()
@@ -2413,22 +2435,15 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
                 flush_account_log("WEBHOOK_EXEC")
                 return result
 
-            # Close existing position
+            # Cancel working brackets first so the flattening MKT is the only live order on this conId.
+            cancel_all_open_orders(
+                IB_INSTANCE,
+                reason="before_exit_market_close",
+                contract=contract,
+            )
             close_position(IB_INSTANCE, contract, qty)
-            # time.sleep(1)
+            _log_position_feed_if_nonzero(IB_INSTANCE, contract, "exit_signal")
 
-            # Retry logic
-            if not wait_until_flat(IB_INSTANCE, contract, settings):
-                log_step("[ALARM] Exit close not reflected — retrying")
-                # close_position(contract, qty)
-                # time.sleep(1)
-
-                #result.update(
-                #    {"ok": False, "action": "exit_failed_after_retry"})
-                # logger.info(f"[IB] Disconnect acct={ACCOUNT_SHORT_NAME} port={acc.api_port} client_id={acc.client_id}")
-                # IB_INSTANCE.disconnect()
-                #flush_account_log("WEBHOOK_EXEC")
-                #return result
             cancel_all_open_orders(IB_INSTANCE,
                                    reason="exit_signal",
                                    contract=contract
@@ -2447,18 +2462,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
             log_step("[EXEC] Exit Long signal received")
 
             if qty > 0:   # only close long positions
-                
+                cancel_all_open_orders(
+                    IB_INSTANCE,
+                    reason="before_exit_long_market_close",
+                    contract=contract,
+                )
                 close_position(IB_INSTANCE, contract, qty)
-                if not wait_until_flat(IB_INSTANCE, contract, settings):
-                    log_step("[ALARM] Exit close not reflected — retrying")
-                    # close_position(contract, qty)
-                    # time.sleep(1)
-
-                    #result.update(
-                    #    {"ok": False, "action": "exit_failed_after_retry"})
-
-                    #flush_account_log("WEBHOOK_EXEC")
-                    #return result
+                _log_position_feed_if_nonzero(IB_INSTANCE, contract, "exit_long")
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_long", contract=contract)
                 result.update({"ok": True, "action": "exit_long_closed"})
@@ -2480,17 +2490,13 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
             log_step("[EXEC] Exit Short signal received")
 
             if qty < 0:   # only close short positions
-                
+                cancel_all_open_orders(
+                    IB_INSTANCE,
+                    reason="before_exit_short_market_close",
+                    contract=contract,
+                )
                 close_position(IB_INSTANCE, contract, qty)
-                if not wait_until_flat(IB_INSTANCE, contract, settings):
-                    log_step("[ALARM] Exit close not reflected — retrying")
-
-
-                    #result.update(
-                    #    {"ok": False, "action": "exit_failed_after_retry"})
-
-                    #flush_account_log("WEBHOOK_EXEC")
-                    #return result
+                _log_position_feed_if_nonzero(IB_INSTANCE, contract, "exit_short")
                 cancel_all_open_orders(
                     IB_INSTANCE, reason="exit_short", contract=contract)
                 result.update({"ok": True, "action": "exit_short_closed"})
@@ -2522,17 +2528,14 @@ def execute_signal_for_account(IB_INSTANCE, sig: Signal, settings: Settings, con
         if qty != 0 and ((qty > 0 and desired_dir < 0) or (qty < 0 and desired_dir > 0)):
             log_step(
                 f"[EXEC] Opposite direction singal: Closing position and opening new one.")
+            cancel_all_open_orders(
+                IB_INSTANCE,
+                reason="before_reversal_market_close",
+                contract=contract,
+            )
             close_position(IB_INSTANCE, contract, qty)
+            _log_position_feed_if_nonzero(IB_INSTANCE, contract, "reversal_close")
 
-            if not wait_until_flat(IB_INSTANCE, contract, settings):
-                log_step(
-                    "[ALARM] Reversal close not confirmed — not clear if existing postions were closed. Skipping execution")
- 
-                #result.update(
-                #    {"ok": False, "action": "reversal_close_not_confirmed"})
-
-                #flush_account_log("WEBHOOK_EXEC")
-                #return result
             cancel_all_open_orders(
                 IB_INSTANCE, reason="before_reversal_entry",  contract=contract)
 
